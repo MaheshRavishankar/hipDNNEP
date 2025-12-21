@@ -64,7 +64,6 @@ void ReferenceConv2D(
     int C_out, int K_h, int K_w,
     int pad_h, int pad_w,
     int stride_h, int stride_w) {
-
   int H_out = (H_in + 2 * pad_h - K_h) / stride_h + 1;
   int W_out = (W_in + 2 * pad_w - K_w) / stride_w + 1;
 
