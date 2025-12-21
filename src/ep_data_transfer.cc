@@ -16,8 +16,8 @@ HipDataTransfer::HipDataTransfer(ApiPtrs api_ptrs, const OrtMemoryDevice* device
 
 /*static*/
 bool ORT_API_CALL HipDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_ptr,
-                                                const OrtMemoryDevice* src_memory_device,
-                                                const OrtMemoryDevice* dst_memory_device) noexcept {
+                                               const OrtMemoryDevice* src_memory_device,
+                                               const OrtMemoryDevice* dst_memory_device) noexcept {
   const auto& impl = *static_cast<const HipDataTransfer*>(this_ptr);
 
   // Get memory types
@@ -57,10 +57,10 @@ bool ORT_API_CALL HipDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_p
 
 /*static*/
 OrtStatus* ORT_API_CALL HipDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* this_ptr,
-                                                          const OrtValue** src_tensors_ptr,
-                                                          OrtValue** dst_tensors_ptr,
-                                                          OrtSyncStream** /*streams_ptr*/,
-                                                          size_t num_tensors) noexcept {
+                                                         const OrtValue** src_tensors_ptr,
+                                                         OrtValue** dst_tensors_ptr,
+                                                         OrtSyncStream** /*streams_ptr*/,
+                                                         size_t num_tensors) noexcept {
   auto& impl = *static_cast<HipDataTransfer*>(this_ptr);
 
   hipError_t err = hipSetDevice(impl.device_id_);

@@ -14,7 +14,6 @@ HipDNNEpFactory::HipDNNEpFactory(const char* ep_name, ApiPtrs apis, const OrtLog
       ep_name_(ep_name),
       default_memory_info_{nullptr},
       readonly_memory_info_{nullptr} {
-
   ort_version_supported = ORT_API_VERSION;
 
   // Initialize function pointers
@@ -102,7 +101,6 @@ OrtStatus* ORT_API_CALL HipDNNEpFactory::GetSupportedDevicesImpl(
     OrtEpDevice** ep_devices,
     size_t max_ep_devices,
     size_t* p_num_ep_devices) noexcept {
-
   auto* factory = static_cast<HipDNNEpFactory*>(this_ptr);
   size_t& num_ep_devices = *p_num_ep_devices;
   num_ep_devices = 0;
@@ -185,7 +183,6 @@ OrtStatus* ORT_API_CALL HipDNNEpFactory::CreateEpImpl(
     const OrtSessionOptions* session_options,
     const OrtLogger* logger,
     OrtEp** ep) noexcept {
-
   auto* factory = static_cast<HipDNNEpFactory*>(this_ptr);
   *ep = nullptr;
 
@@ -228,7 +225,6 @@ OrtStatus* ORT_API_CALL HipDNNEpFactory::CreateAllocatorImpl(
     const OrtMemoryInfo* memory_info,
     const OrtKeyValuePairs* /*allocator_options*/,
     OrtAllocator** allocator) noexcept {
-
   auto& factory = *static_cast<HipDNNEpFactory*>(this_ptr);
   std::lock_guard<std::mutex> lock(factory.mutex_);
 
@@ -246,7 +242,7 @@ OrtStatus* ORT_API_CALL HipDNNEpFactory::CreateAllocatorImpl(
 
 /*static*/
 void ORT_API_CALL HipDNNEpFactory::ReleaseAllocatorImpl(OrtEpFactory* /*this_ptr*/,
-                                                         OrtAllocator* /*allocator*/) noexcept {
+                                                        OrtAllocator* /*allocator*/) noexcept {
   // Allocator is owned by factory, don't delete here
 }
 
@@ -254,7 +250,6 @@ void ORT_API_CALL HipDNNEpFactory::ReleaseAllocatorImpl(OrtEpFactory* /*this_ptr
 OrtStatus* ORT_API_CALL HipDNNEpFactory::CreateDataTransferImpl(
     OrtEpFactory* this_ptr,
     OrtDataTransferImpl** data_transfer) noexcept {
-
   auto& factory = *static_cast<HipDNNEpFactory*>(this_ptr);
   *data_transfer = factory.data_transfer_impl_.get();
   return nullptr;
@@ -272,7 +267,6 @@ OrtStatus* ORT_API_CALL HipDNNEpFactory::CreateSyncStreamForDeviceImpl(
     const OrtMemoryDevice* /*memory_device*/,
     const OrtKeyValuePairs* /*stream_options*/,
     OrtSyncStreamImpl** stream) noexcept {
-
   // TODO: Implement stream support
   *stream = nullptr;
   return nullptr;

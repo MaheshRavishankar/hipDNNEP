@@ -41,8 +41,8 @@ struct Kernel {
   std::vector<char> workspace_;
 
   // Graph input/output info (stored at compile time)
-  std::vector<int64_t> input_uids_;                // UID for each graph input
-  std::vector<int64_t> output_uids_;               // UID for each graph output
+  std::vector<int64_t> input_uids_;   // UID for each graph input
+  std::vector<int64_t> output_uids_;  // UID for each graph output
   std::vector<std::vector<int64_t>> output_shapes_;
 
   // Symbol table: maps value name to TensorAttributes

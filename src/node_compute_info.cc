@@ -19,7 +19,6 @@ OrtStatus* ORT_API_CALL NodeComputeInfo::CreateStateImpl(
     OrtNodeComputeInfo* this_ptr,
     OrtNodeComputeContext* compute_context,
     void** compute_state) {
-
   auto* info = static_cast<NodeComputeInfo*>(this_ptr);
   HipDNNEp& ep = info->ep;
 
@@ -38,7 +37,6 @@ OrtStatus* ORT_API_CALL NodeComputeInfo::ComputeImpl(
     OrtNodeComputeInfo* /*this_ptr*/,
     void* compute_state,
     OrtKernelContext* kernel_context) {
-
   auto* kernel = static_cast<Kernel*>(compute_state);
   return kernel->Execute(kernel_context);
 }

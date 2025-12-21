@@ -74,10 +74,10 @@ OrtStatus* CreateTensorAttr(
 
   out_attr = std::make_shared<TensorAttributes>();
   out_attr->set_uid(uid)
-          .set_name(name)
-          .set_data_type(dtype.value())
-          .set_dim(shape.value())
-          .set_stride(ComputeStrides(shape.value()));
+      .set_name(name)
+      .set_data_type(dtype.value())
+      .set_dim(shape.value())
+      .set_stride(ComputeStrides(shape.value()));
 
   return nullptr;
 }
@@ -122,10 +122,10 @@ OrtStatus* AddConvNode(
   // Create convolution attributes
   ConvFpropAttributes conv_attrs;
   conv_attrs.set_padding({pads[0], pads[1]})  // Use begin padding
-            .set_stride({strides[0], strides[1]})
-            .set_dilation({dilations[0], dilations[1]})
-            .set_convolution_mode(ConvolutionMode::CROSS_CORRELATION)
-            .set_compute_data_type(compute_dtype.value());
+      .set_stride({strides[0], strides[1]})
+      .set_dilation({dilations[0], dilations[1]})
+      .set_convolution_mode(ConvolutionMode::CROSS_CORRELATION)
+      .set_compute_data_type(compute_dtype.value());
 
   // Add convolution to graph - returns output tensor attributes
   output_attr = graph.conv_fprop(x_attr, w_attr, conv_attrs);
@@ -210,8 +210,7 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
       std::vector<Ort::ConstValueInfo> node_outputs = node.GetOutputs();
       if (output_attrs.size() != node_outputs.size()) {
         RETURN_ERROR(ort_api_, ORT_EP_FAIL,
-            "Output count mismatch for node " << node.GetName() <<
-            ": expected " << node_outputs.size() << ", got " << output_attrs.size());
+                     "Output count mismatch for node " << node.GetName() << ": expected " << node_outputs.size() << ", got " << output_attrs.size());
       }
 
       for (size_t i = 0; i < output_attrs.size(); ++i) {
@@ -229,11 +228,7 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
           RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Output must have static shape: " << name);
         }
 
-        output_attrs[i]->set_uid(next_uid_++)
-                       .set_name(name)
-                       .set_data_type(dtype.value())
-                       .set_dim(shape.value())
-                       .set_stride(ComputeStrides(shape.value()));
+        output_attrs[i]->set_uid(next_uid_++).set_name(name).set_data_type(dtype.value()).set_dim(shape.value()).set_stride(ComputeStrides(shape.value()));
         symbol_table_[name] = output_attrs[i];
       }
     }
@@ -316,11 +311,11 @@ OrtStatus* Kernel::Execute(OrtKernelContext* kernel_ctx) {
     // Validate input/output counts match what we compiled for
     if (context.GetInputCount() != input_uids_.size()) {
       RETURN_ERROR(ort_api_, ORT_EP_FAIL,
-          "Input count mismatch: expected " << input_uids_.size() << ", got " << context.GetInputCount());
+                   "Input count mismatch: expected " << input_uids_.size() << ", got " << context.GetInputCount());
     }
     if (context.GetOutputCount() != output_uids_.size()) {
       RETURN_ERROR(ort_api_, ORT_EP_FAIL,
-          "Output count mismatch: expected " << output_uids_.size() << ", got " << context.GetOutputCount());
+                   "Output count mismatch: expected " << output_uids_.size() << ", got " << context.GetOutputCount());
     }
 
     // Build variant pack mapping UIDs to data pointers

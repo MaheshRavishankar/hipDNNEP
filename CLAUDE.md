@@ -7,6 +7,9 @@ This is an out-of-tree ONNXRuntime Execution Provider (EP) that uses AMD's hipDN
 ## Build Commands
 
 ```bash
+# Ensure iree-compile is in PATH
+export PATH="/path/to/iree/build/tools:$PATH"
+
 # Configure
 cmake --preset RelWithDebInfo
 
@@ -21,33 +24,33 @@ ctest --preset RelWithDebInfo
 
 Before building, ensure these environment variables are set:
 ```bash
-export HIPDNN_ROOT="/path/to/hipDNN/stage"
+export THEROCK_DIST="/path/to/TheRock/build/dist/rocm"
 export ONNXRUNTIME_ROOT="/path/to/onnxruntime"
+export PATH="/path/to/iree/build/tools:$PATH"
 ```
 
-## Project Structure
+## Git Workflow
 
-- `include/hipdnn_ep/` - Public headers
-- `src/` - Implementation files
-- `src/kernels/` - Kernel implementations (Conv, etc.)
-- `test/` - Unit tests
-- `cmake/` - CMake modules
-- `docs/InitialBringUp/` - Design documents
+- **Branch naming**: `users/<author>/<branchName>` (camelCase)
+  - Example: `users/MaheshRavishankar/addClangFormat`
+- **Main branch**: Protected, requires PR with 1 approval
+- **Merge method**: Squash only
 
 ## Key Components
 
 - **HipDNNEpFactory** (`ep_factory.h/cc`) - Factory for creating EP instances, device discovery
 - **HipDNNEp** (`ep.h/cc`) - Main EP class, graph partitioning, kernel compilation
+- **Kernel** (`kernel.h/cc`) - Builds hipDNN graph from ONNX nodes, executes inference
+- **NodeComputeInfo** (`node_compute_info.h/cc`) - ORT callback interface for kernel lifecycle
 - **HipDeviceAllocator** (`ep_allocator.h/cc`) - GPU memory allocator
 - **HipDataTransfer** (`ep_data_transfer.h/cc`) - CPU<->GPU data transfers
-- **ConvKernel** (`kernels/conv_kernel.h/cc`) - Convolution implementation using hipDNN
 
 ## Code Style
 
+- Uses clang-format with Google style base (see `.clang-format`)
 - Use `static` functions in anonymous namespaces for file-local helpers
 - Keep implementation details out of headers where possible
 - Use RAII and smart pointers for resource management
-- Add TODOs for known limitations or future work
 
 ## Testing
 
@@ -61,3 +64,4 @@ ctest --preset RelWithDebInfo --output-on-failure
 - Currently supports Conv2D operations only
 - Uses hipDNN graph API (not legacy immediate API)
 - Plugin EP v2 API for dynamic loading
+- Requires iree-compile in PATH for hipDNN backend code generation

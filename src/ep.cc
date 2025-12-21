@@ -94,7 +94,6 @@ HipDNNEp::HipDNNEp(HipDNNEpFactory& factory, const Config& config, const OrtLogg
       factory_(factory),
       config_(config),
       logger_(logger) {
-
   // TODO: Do better version management.
   ort_version_supported = ORT_API_VERSION;
 
@@ -146,7 +145,6 @@ OrtStatus* ORT_API_CALL HipDNNEp::GetCapabilityImpl(
     OrtEp* this_ptr,
     const OrtGraph* ort_graph,
     OrtEpGraphSupportInfo* graph_support_info) noexcept {
-
   try {
     auto* ep = static_cast<HipDNNEp*>(this_ptr);
 
@@ -207,7 +205,6 @@ OrtStatus* ORT_API_CALL HipDNNEp::CompileImpl(
     size_t count,
     OrtNodeComputeInfo** node_compute_infos,
     OrtNode** /*ep_context_nodes*/) noexcept {
-
   try {
     auto* ep = static_cast<HipDNNEp*>(this_ptr);
 
@@ -248,7 +245,6 @@ void ORT_API_CALL HipDNNEp::ReleaseNodeComputeInfosImpl(
     OrtEp* /*this_ptr*/,
     OrtNodeComputeInfo** node_compute_infos,
     size_t num_node_compute_infos) noexcept {
-
   for (size_t i = 0; i < num_node_compute_infos; ++i) {
     delete static_cast<NodeComputeInfo*>(node_compute_infos[i]);
   }
@@ -259,7 +255,6 @@ OrtStatus* ORT_API_CALL HipDNNEp::CreateAllocatorImpl(
     OrtEp* this_ptr,
     const OrtMemoryInfo* memory_info,
     OrtAllocator** allocator) noexcept {
-
   auto* ep = static_cast<HipDNNEp*>(this_ptr);
   return ep->factory_.CreateAllocator(&ep->factory_, memory_info, nullptr, allocator);
 }
@@ -269,7 +264,6 @@ OrtStatus* ORT_API_CALL HipDNNEp::CreateSyncStreamForDeviceImpl(
     OrtEp* /*this_ptr*/,
     const OrtMemoryDevice* /*memory_device*/,
     OrtSyncStreamImpl** stream) noexcept {
-
   // TODO: Implement stream support
   *stream = nullptr;
   return nullptr;

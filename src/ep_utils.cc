@@ -32,7 +32,7 @@ int64_t GetIntAttrOrDefault(Ort::ConstNode node, const char* name, int64_t defau
 }
 
 std::vector<int64_t> GetIntsAttrOrDefault(Ort::ConstNode node, const char* name,
-                                           const std::vector<int64_t>& default_val) {
+                                          const std::vector<int64_t>& default_val) {
   Ort::ConstOpAttr attr{nullptr};
   auto status = node.GetAttributeByName(name, attr);
   if (!status.IsOK() || !static_cast<const OrtOpAttr*>(attr)) {

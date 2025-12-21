@@ -17,10 +17,10 @@ struct HipDataTransfer : OrtDataTransferImpl, ApiPtrs {
                                        const OrtMemoryDevice* dst_memory_device) noexcept;
 
   static OrtStatus* ORT_API_CALL CopyTensorsImpl(OrtDataTransferImpl* this_ptr,
-                                                  const OrtValue** src_tensors_ptr,
-                                                  OrtValue** dst_tensors_ptr,
-                                                  OrtSyncStream** streams_ptr,
-                                                  size_t num_tensors) noexcept;
+                                                 const OrtValue** src_tensors_ptr,
+                                                 OrtValue** dst_tensors_ptr,
+                                                 OrtSyncStream** streams_ptr,
+                                                 size_t num_tensors) noexcept;
 
   static void ORT_API_CALL ReleaseImpl(OrtDataTransferImpl* this_ptr) noexcept;
 

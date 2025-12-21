@@ -5,17 +5,17 @@
 
 // Symbol visibility for exported functions
 #ifdef _WIN32
-  #ifdef HIPDNN_EP_EXPORTS
-    #define HIPDNN_EP_API __declspec(dllexport)
-  #else
-    #define HIPDNN_EP_API __declspec(dllimport)
-  #endif
+#ifdef HIPDNN_EP_EXPORTS
+#define HIPDNN_EP_API __declspec(dllexport)
 #else
-  #ifdef HIPDNN_EP_EXPORTS
-    #define HIPDNN_EP_API __attribute__((visibility("default")))
-  #else
-    #define HIPDNN_EP_API
-  #endif
+#define HIPDNN_EP_API __declspec(dllimport)
+#endif
+#else
+#ifdef HIPDNN_EP_EXPORTS
+#define HIPDNN_EP_API __attribute__((visibility("default")))
+#else
+#define HIPDNN_EP_API
+#endif
 #endif
 
 using namespace hipdnn_ep;
@@ -37,7 +37,6 @@ HIPDNN_EP_API OrtStatus* CreateEpFactories(
     OrtEpFactory** factories,
     size_t max_factories,
     size_t* num_factories) {
-
   const OrtApi* ort_api = ort_api_base->GetApi(ORT_API_VERSION);
   const OrtEpApi* ep_api = ort_api->GetEpApi();
   const OrtModelEditorApi* model_editor_api = ort_api->GetModelEditorApi();
@@ -48,7 +47,7 @@ HIPDNN_EP_API OrtStatus* CreateEpFactories(
   if (max_factories < 1) {
     *num_factories = 0;
     return ort_api->CreateStatus(ORT_INVALID_ARGUMENT,
-                                  "Not enough space for EP factory. Need at least 1.");
+                                 "Not enough space for EP factory. Need at least 1.");
   }
 
   try {

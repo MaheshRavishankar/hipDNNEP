@@ -102,7 +102,7 @@ const struct OrtMemoryInfo* ORT_API_CALL HipDeviceAllocator::InfoImpl(const stru
 
 /*static*/
 OrtStatus* ORT_API_CALL HipDeviceAllocator::GetStatsImpl(const struct OrtAllocator* this_,
-                                                          OrtKeyValuePairs** out) noexcept {
+                                                         OrtKeyValuePairs** out) noexcept {
   const auto& impl = *static_cast<const HipDeviceAllocator*>(this_);
 
   OrtKeyValuePairs* kvps = nullptr;

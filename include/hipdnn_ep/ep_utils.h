@@ -33,14 +33,14 @@
     }                                                    \
   } while (0)
 
-#define HIPDNN_EP_ENFORCE(condition, ...)                    \
-  do {                                                       \
-    if (!(condition)) {                                      \
-      std::ostringstream oss;                                \
+#define HIPDNN_EP_ENFORCE(condition, ...)                       \
+  do {                                                          \
+    if (!(condition)) {                                         \
+      std::ostringstream oss;                                   \
       oss << "HIPDNN_EP_ENFORCE failed: " << #condition << " "; \
-      oss << __VA_ARGS__;                                    \
-      throw std::runtime_error(oss.str());                   \
-    }                                                        \
+      oss << __VA_ARGS__;                                       \
+      throw std::runtime_error(oss.str());                      \
+    }                                                           \
   } while (false)
 
 #define IGNORE_ORTSTATUS(status_expr)   \
@@ -67,18 +67,18 @@ struct ApiPtrs {
 };
 
 // Logging macro (requires 'api_' and 'logger_' in scope)
-#define LOG(api, logger, level, ...)                                                    \
-  do {                                                                                   \
-    std::ostringstream ss;                                                               \
-    ss << __VA_ARGS__;                                                                   \
-    IGNORE_ORTSTATUS((api).Logger_LogMessage(&(logger), ORT_LOGGING_LEVEL_##level,       \
+#define LOG(api, logger, level, ...)                                                              \
+  do {                                                                                            \
+    std::ostringstream ss;                                                                        \
+    ss << __VA_ARGS__;                                                                            \
+    IGNORE_ORTSTATUS((api).Logger_LogMessage(&(logger), ORT_LOGGING_LEVEL_##level,                \
                                              ss.str().c_str(), EP_FILE, __LINE__, __FUNCTION__)); \
   } while (false)
 
-#define RETURN_ERROR(api, code, ...)                  \
-  do {                                                \
-    std::ostringstream ss;                            \
-    ss << __VA_ARGS__;                                \
+#define RETURN_ERROR(api, code, ...)                   \
+  do {                                                 \
+    std::ostringstream ss;                             \
+    ss << __VA_ARGS__;                                 \
     return (api).CreateStatus(code, ss.str().c_str()); \
   } while (false)
 
@@ -147,6 +147,6 @@ int64_t GetIntAttrOrDefault(Ort::ConstNode node, const char* name, int64_t defau
 
 // Helper to get an int64 array attribute with a default value
 std::vector<int64_t> GetIntsAttrOrDefault(Ort::ConstNode node, const char* name,
-                                           const std::vector<int64_t>& default_val);
+                                          const std::vector<int64_t>& default_val);
 
 }  // namespace hipdnn_ep
