@@ -3,6 +3,8 @@
 
 #include "hipdnn_ep/kernel.h"
 
+#include <iostream>
+
 namespace hipdnn_ep {
 
 namespace {
@@ -93,6 +95,8 @@ OrtStatus* AddConvNode(
   using namespace hipdnn_frontend::graph;
   using hipdnn_frontend::ConvolutionMode;
 
+  std::cerr << "AddConvNode 0" << std::endl;
+
   if (input_attrs.size() < 2) {
     RETURN_ERROR(ort_api, ORT_EP_FAIL, "Conv requires at least 2 input tensor attributes");
   }
@@ -130,6 +134,8 @@ OrtStatus* AddConvNode(
   // Add convolution to graph - returns output tensor attributes
   output_attr = graph.conv_fprop(x_attr, w_attr, conv_attrs);
 
+  std::cerr << "AddConvNode 1" << std::endl;
+
   return nullptr;
 }
 
@@ -142,6 +148,7 @@ OrtStatus* AddNode(
     const std::vector<TensorAttrPtr>& input_attrs,
     std::vector<TensorAttrPtr>& output_attrs) {
   std::string op_type = node.GetOperatorType();
+  std::cerr << "AddNode: " << op_type << std::endl;
 
   if (op_type == "Conv") {
     TensorAttrPtr y_attr;
@@ -168,6 +175,7 @@ Kernel::~Kernel() = default;
 OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
   try {
     using namespace hipdnn_frontend::graph;
+    std::cerr << "BuildAndCompile 0" << std::endl;
 
     graph_ = std::make_unique<Graph>();
 
@@ -255,6 +263,7 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
     // Compile the graph
     RETURN_IF_ERROR(CompileGraph());
 
+    std::cerr << "BuildAndCompile 1" << std::endl;
   } catch (const std::exception& ex) {
     RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Exception building hipDNN graph: " << ex.what());
   }
@@ -264,6 +273,8 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
 
 OrtStatus* Kernel::CompileGraph() {
   using hipdnn_frontend::HeuristicMode;
+
+  std::cerr << "CompileGraph 0" << std::endl;
 
   auto error = graph_->validate();
   if (error.is_bad()) {
@@ -301,11 +312,15 @@ OrtStatus* Kernel::CompileGraph() {
     workspace_.resize(workspace_size);
   }
 
+  std::cerr << "CompileGraph 1" << std::endl;
+
   return nullptr;
 }
 
 OrtStatus* Kernel::Execute(OrtKernelContext* kernel_ctx) {
   try {
+    std::cerr << "Execute 0" << std::endl;
+
     Ort::KernelContext context(kernel_ctx);
 
     // Validate input/output counts match what we compiled for
@@ -340,6 +355,7 @@ OrtStatus* Kernel::Execute(OrtKernelContext* kernel_ctx) {
       RETURN_ERROR(ort_api_, ORT_EP_FAIL, "hipDNN execute failed: " << error.get_message());
     }
 
+    std::cerr << "Execute 1" << std::endl;
   } catch (const Ort::Exception& ex) {
     Ort::Status status(ex);
     return status.release();

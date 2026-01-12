@@ -8,6 +8,8 @@
 
 #include <hipdnn_backend.h>
 
+#include <iostream>
+
 namespace hipdnn_ep {
 
 namespace {
@@ -223,6 +225,7 @@ OrtStatus* ORT_API_CALL HipDNNEp::CompileImpl(
 
       std::string fused_node_name = fused_node.GetName();
       ep->kernels_.emplace(fused_node_name, std::move(kernel));
+      std::cerr << "HipDNNEp::CompileImpl: " << fused_node_name << std::endl;
 
       // Create node compute info
       auto compute_info = std::make_unique<NodeComputeInfo>(*ep);

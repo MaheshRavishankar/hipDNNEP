@@ -100,6 +100,9 @@ target_compile_definitions(hipdnn_ep PRIVATE
   ORT_API_MANUAL_INIT
 )
 
+target_compile_options(hipdnn_ep PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+target_compile_options(hipdnn_ep PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/Zc:__cplusplus>")
+
 # Tests
 if(HIPDNN_EP_BUILD_TESTS)
   enable_testing()
