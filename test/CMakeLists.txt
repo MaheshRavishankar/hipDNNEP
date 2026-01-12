@@ -41,8 +41,12 @@ target_link_libraries(hipdnn_ep_tests PRIVATE
   GTest::gtest_main
   ${ONNXRUNTIME_LIB}
   hip::host
-  dl
 )
+
+# dl is only needed on Unix/Linux
+if(UNIX)
+  target_link_libraries(hipdnn_ep_tests PRIVATE dl)
+endif()
 
 # Copy test model to build directory
 set(CONV_TEST_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/conv_test.onnx")

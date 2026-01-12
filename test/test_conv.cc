@@ -12,8 +12,23 @@
 #endif
 #include "onnxruntime_cxx_api.h"
 
+#ifdef _WIN32
+#define NOMINMAX  // Prevent Windows min/max macros
+#include <windows.h>
+inline std::wstring ToWideString(const char* str) {
+  int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
+  std::wstring result(len - 1, 0);
+  MultiByteToWideChar(CP_UTF8, 0, str, -1, &result[0], len);
+  return result;
+}
+#endif
+
 #ifndef HIPDNN_EP_LIB_PATH
+#ifdef _WIN32
+#define HIPDNN_EP_LIB_PATH "./hipdnn_ep.dll"
+#else
 #define HIPDNN_EP_LIB_PATH "./libhipdnn_ep.so"
+#endif
 #endif
 
 #ifndef CONV_TEST_MODEL_PATH
@@ -23,13 +38,20 @@
 class HipDNNConvTest : public ::testing::Test {
  protected:
   void SetUp() override {
+    // Initialize ORT
     Ort::InitApi(OrtGetApiBase()->GetApi(ORT_API_VERSION));
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "HipDNNConvTest");
 
     // Register EP
-    const char* lib_path = HIPDNN_EP_LIB_PATH;
+    const char* lib_path_str = HIPDNN_EP_LIB_PATH;
+#ifdef _WIN32
+    auto lib_path_w = ToWideString(lib_path_str);
     OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
-        *env_, "HipDNN", lib_path);
+        *env_, "HipDNN", lib_path_w.c_str());
+#else
+    OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
+        *env_, "HipDNN", lib_path_str);
+#endif
 
     if (status != nullptr) {
       std::string error_msg = Ort::GetApi().GetErrorMessage(status);
@@ -115,7 +137,12 @@ TEST_F(HipDNNConvTest, BasicConv2D) {
   std::vector<float> cpu_output;
   {
     Ort::SessionOptions session_options;
+#ifdef _WIN32
+    auto model_path_w = ToWideString(CONV_TEST_MODEL_PATH);
+    Ort::Session session(*env_, model_path_w.c_str(), session_options);
+#else
     Ort::Session session(*env_, CONV_TEST_MODEL_PATH, session_options);
+#endif
 
     auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
@@ -170,7 +197,12 @@ TEST_F(HipDNNConvTest, BasicConv2D) {
     }
 
     std::cout << "Creating session with HipDNN EP..." << std::endl;
+#ifdef _WIN32
+    auto model_path_w = ToWideString(CONV_TEST_MODEL_PATH);
+    Ort::Session session(*env_, model_path_w.c_str(), session_options);
+#else
     Ort::Session session(*env_, CONV_TEST_MODEL_PATH, session_options);
+#endif
     std::cout << "Session created successfully" << std::endl;
 
     auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);

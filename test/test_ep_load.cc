@@ -9,8 +9,22 @@
 #endif
 #include "onnxruntime_cxx_api.h"
 
+#ifdef _WIN32
+#include <windows.h>
+inline std::wstring ToWideString(const char* str) {
+  int len = MultiByteToWideChar(CP_UTF8, 0, str, -1, nullptr, 0);
+  std::wstring result(len - 1, 0);
+  MultiByteToWideChar(CP_UTF8, 0, str, -1, &result[0], len);
+  return result;
+}
+#endif
+
 #ifndef HIPDNN_EP_LIB_PATH
+#ifdef _WIN32
+#define HIPDNN_EP_LIB_PATH "./hipdnn_ep.dll"
+#else
 #define HIPDNN_EP_LIB_PATH "./libhipdnn_ep.so"
+#endif
 #endif
 
 class HipDNNEpLoadTest : public ::testing::Test {
@@ -29,10 +43,15 @@ class HipDNNEpLoadTest : public ::testing::Test {
 };
 
 TEST_F(HipDNNEpLoadTest, RegisterEpLibrary) {
-  const char* lib_path = HIPDNN_EP_LIB_PATH;
-
+  const char* lib_path_str = HIPDNN_EP_LIB_PATH;
+#ifdef _WIN32
+  auto lib_path_w = ToWideString(lib_path_str);
   OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
-      *env_, "HipDNN", lib_path);
+      *env_, "HipDNN", lib_path_w.c_str());
+#else
+  OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
+      *env_, "HipDNN", lib_path_str);
+#endif
 
   if (status != nullptr) {
     std::string error_msg = Ort::GetApi().GetErrorMessage(status);
@@ -44,11 +63,17 @@ TEST_F(HipDNNEpLoadTest, RegisterEpLibrary) {
 }
 
 TEST_F(HipDNNEpLoadTest, GetEpDevices) {
-  const char* lib_path = HIPDNN_EP_LIB_PATH;
+  const char* lib_path_str = HIPDNN_EP_LIB_PATH;
 
   // First register the EP
+#ifdef _WIN32
+  auto lib_path_w = ToWideString(lib_path_str);
   OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
-      *env_, "HipDNN", lib_path);
+      *env_, "HipDNN", lib_path_w.c_str());
+#else
+  OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
+      *env_, "HipDNN", lib_path_str);
+#endif
 
   if (status != nullptr) {
     std::string error_msg = Ort::GetApi().GetErrorMessage(status);
