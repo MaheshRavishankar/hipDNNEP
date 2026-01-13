@@ -37,18 +37,24 @@ if(NOT IREE_COMPILE)
 endif()
 message(STATUS "Found iree-compile: ${IREE_COMPILE}")
 
-# ONNXRuntime headers
-set(ONNXRUNTIME_ROOT "$ENV{ONNXRUNTIME_ROOT}" CACHE PATH "Path to ONNXRuntime source")
+# ONNXRuntime headers - support both source layout and installed layout
+set(ONNXRUNTIME_ROOT "$ENV{ONNXRUNTIME_ROOT}" CACHE PATH "Path to ONNXRuntime source or install prefix")
 if(NOT ONNXRUNTIME_ROOT)
   message(FATAL_ERROR "ONNXRUNTIME_ROOT must be specified. Set it via -DONNXRUNTIME_ROOT=<path> or ONNXRUNTIME_ROOT environment variable.")
 endif()
 
+# Try source layout first: include/onnxruntime/core/session/
 set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session")
-
-# Verify ONNXRuntime headers exist
 if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_c_api.h")
-  message(FATAL_ERROR "ONNXRuntime headers not found at ${ONNXRUNTIME_INCLUDE_DIR}")
+  # Try installed layout: include/onnxruntime/
+  set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include/onnxruntime")
+  if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_c_api.h")
+    message(FATAL_ERROR "ONNXRuntime headers not found. Tried:\n"
+                        "  - ${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session/\n"
+                        "  - ${ONNXRUNTIME_ROOT}/include/onnxruntime/")
+  endif()
 endif()
+message(STATUS "Found ONNXRuntime headers at: ${ONNXRUNTIME_INCLUDE_DIR}")
 
 # Main library
 add_library(hipdnn_ep SHARED

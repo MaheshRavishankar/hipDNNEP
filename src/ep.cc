@@ -7,6 +7,9 @@
 #include "hipdnn_ep/node_compute_info.h"
 
 #include <hipdnn_backend.h>
+#include <cstdlib>
+#include <iostream>
+#include <string>
 
 namespace hipdnn_ep {
 
@@ -105,11 +108,43 @@ HipDNNEp::HipDNNEp(HipDNNEpFactory& factory, const Config& config, const OrtLogg
   CreateAllocator = CreateAllocatorImpl;
   CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
 
-  // Initialize hipDNN
+  // Configure hipDNN engine plugin search paths BEFORE creating handle.
+  // Plugins are loaded during handle creation, so this must be called first.
+  // See: hipdnn_backend.h - hipdnnSetEnginePluginPaths_ext documentation
+  const char* therock_dist = std::getenv("THEROCK_DIST");
+  std::cerr << "[HipDNNEP DEBUG] THEROCK_DIST = " << (therock_dist ? therock_dist : "(null)") << std::endl;
+  if (therock_dist) {
+#ifdef _WIN32
+    // Try both the directory and the specific DLL file path
+    std::string plugin_dir = std::string(therock_dist) + "\\bin\\hipdnn_plugins\\engines";
+    std::string plugin_dll = plugin_dir + "\\miopen_legacy_plugin.dll";
+#else
+    std::string plugin_dir = std::string(therock_dist) + "/bin/hipdnn_plugins/engines";
+    std::string plugin_dll = plugin_dir + "/miopen_legacy_plugin.so";
+#endif
+    std::cerr << "[HipDNNEP DEBUG] Setting plugin path (DLL): " << plugin_dll << std::endl;
+    const char* paths[] = {plugin_dll.c_str()};
+    // Try ABSOLUTE mode to ensure our path is used instead of defaults
+    hipdnnStatus_t plugin_status = hipdnnSetEnginePluginPaths_ext(1, paths, HIPDNN_PLUGIN_LOADING_ABSOLUTE);
+    std::cerr << "[HipDNNEP DEBUG] hipdnnSetEnginePluginPaths_ext returned: " << static_cast<int>(plugin_status) << std::endl;
+  } else {
+    std::cerr << "[HipDNNEP DEBUG] THEROCK_DIST not set, skipping plugin path configuration" << std::endl;
+  }
+
+  // Initialize hipDNN (plugins are loaded here)
   hipdnnStatus_t status = hipdnnCreate(&hipdnn_handle_);
+  std::cerr << "[HipDNNEP DEBUG] hipdnnCreate returned: " << static_cast<int>(status) << std::endl;
   if (status != HIPDNN_STATUS_SUCCESS) {
     throw std::runtime_error("Failed to create hipDNN handle");
   }
+
+  // Query loaded plugins
+  size_t numPlugins = 0;
+  size_t maxStringLen = 0;
+  hipdnnStatus_t query_status = hipdnnGetLoadedEnginePluginPaths_ext(
+      hipdnn_handle_, &numPlugins, nullptr, &maxStringLen);
+  std::cerr << "[HipDNNEP DEBUG] Loaded plugins count: " << numPlugins 
+            << " (query status: " << static_cast<int>(query_status) << ")" << std::endl;
 
   IGNORE_ORTSTATUS(ort_api.Logger_LogMessage(
       &logger_, ORT_LOGGING_LEVEL_INFO,

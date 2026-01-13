@@ -14,17 +14,27 @@ if(NOT GTest_FOUND)
   FetchContent_MakeAvailable(googletest)
 endif()
 
-# ONNXRuntime library for testing
+# ONNXRuntime library for testing - support both source and installed layouts
 set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/build/RelWithDebInfo" CACHE PATH "ONNXRuntime library directory")
 
 find_library(ONNXRUNTIME_LIB onnxruntime
-  HINTS ${ONNXRUNTIME_LIB_DIR}
+  HINTS
+    ${ONNXRUNTIME_LIB_DIR}
+    "${ONNXRUNTIME_ROOT}/lib"
+    "${ONNXRUNTIME_ROOT}/bin"
+    "${ONNXRUNTIME_ROOT}/build/Windows/RelWithDebInfo/RelWithDebInfo"
 )
 
 if(NOT ONNXRUNTIME_LIB)
-  message(WARNING "ONNXRuntime library not found at ${ONNXRUNTIME_LIB_DIR}. Tests will not be built.")
+  message(WARNING "ONNXRuntime library not found. Tried:\n"
+                  "  - ${ONNXRUNTIME_LIB_DIR}\n"
+                  "  - ${ONNXRUNTIME_ROOT}/lib\n"
+                  "  - ${ONNXRUNTIME_ROOT}/bin\n"
+                  "  - ${ONNXRUNTIME_ROOT}/build/Windows/RelWithDebInfo/RelWithDebInfo\n"
+                  "Tests will not be built.")
   return()
 endif()
+message(STATUS "Found ONNXRuntime library: ${ONNXRUNTIME_LIB}")
 
 # Test executable
 add_executable(hipdnn_ep_tests
@@ -41,8 +51,12 @@ target_link_libraries(hipdnn_ep_tests PRIVATE
   GTest::gtest_main
   ${ONNXRUNTIME_LIB}
   hip::host
-  dl
 )
+
+# dl is only needed on Unix/Linux
+if(UNIX)
+  target_link_libraries(hipdnn_ep_tests PRIVATE dl)
+endif()
 
 # Copy test model to build directory
 set(CONV_TEST_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/conv_test.onnx")
