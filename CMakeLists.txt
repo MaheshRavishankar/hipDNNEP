@@ -27,8 +27,11 @@ list(APPEND CMAKE_PREFIX_PATH "${THEROCK_DIST}")
 # Find HIP from TheRock
 find_package(hip REQUIRED CONFIG)
 
-# Find hipDNN from TheRock
-find_package(hipdnn_frontend CONFIG REQUIRED)
+# Find MIOpen from TheRock
+find_package(miopen REQUIRED CONFIG)
+
+# Find hipDNN from TheRock (optional, for future use)
+# find_package(hipdnn_frontend CONFIG)
 # find_package(hipdnn_backend CONFIG REQUIRED)
 
 # iree-compile is required at runtime by hipDNN backend
@@ -63,6 +66,7 @@ add_library(hipdnn_ep SHARED
   src/hipdnn_ep_exports.cc
   src/kernel.cc
   src/node_compute_info.cc
+  src/memcpy_kernel.cc
 )
 
 target_include_directories(hipdnn_ep
@@ -75,9 +79,9 @@ target_include_directories(hipdnn_ep
 
 target_link_libraries(hipdnn_ep
   PRIVATE
-    hipdnn_frontend
-    # hipdnn_backend
+    MIOpen
     hip::host
+    # $<$<BOOL:${hipdnn_frontend_FOUND}>:hipdnn_frontend>
 )
 
 # Symbol visibility

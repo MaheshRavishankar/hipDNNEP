@@ -9,358 +9,385 @@ namespace hipdnn_ep {
 
 namespace {
 
-// Helper function to compute strides from shape (NCHW layout)
-std::vector<int64_t> ComputeStrides(const std::vector<int64_t>& shape) {
-  std::vector<int64_t> strides(shape.size());
-  int64_t stride = 1;
-  for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
-    strides[i] = stride;
-    stride *= shape[i];
-  }
-  return strides;
-}
+// Helper to check MIOpen status
+#define MIOPEN_CHECK(call)                                                  \
+  do {                                                                       \
+    miopenStatus_t status = (call);                                         \
+    if (status != miopenStatusSuccess) {                                    \
+      std::cerr << "MIOpen error: " << status << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+    }                                                                        \
+  } while (0)
 
-// Convert ONNX tensor element data type to hipDNN data type
-std::optional<hipdnn_frontend::DataType> ToHipDNNDataType(ONNXTensorElementDataType onnx_dtype) {
-  using hipdnn_frontend::DataType;
+#define MIOPEN_RETURN_IF_ERROR(ort_api, call)                               \
+  do {                                                                       \
+    miopenStatus_t status = (call);                                         \
+    if (status != miopenStatusSuccess) {                                    \
+      RETURN_ERROR(ort_api, ORT_EP_FAIL, "MIOpen error: " << status);       \
+    }                                                                        \
+  } while (0)
+
+// Convert ONNX data type to MIOpen data type
+miopenDataType_t ToMIOpenDataType(ONNXTensorElementDataType onnx_dtype) {
   switch (onnx_dtype) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      return DataType::FLOAT;
+      return miopenFloat;
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      return DataType::HALF;
+      return miopenHalf;
     default:
-      return std::nullopt;
+      return miopenFloat;
   }
-}
-
-// Determine compute data type based on input data types
-// For float types with precision <= float32, compute in float32
-std::optional<hipdnn_frontend::DataType> GetComputeDataType(
-    hipdnn_frontend::DataType x_dtype,
-    hipdnn_frontend::DataType w_dtype) {
-  using hipdnn_frontend::DataType;
-
-  // Both must be float types (FLOAT or HALF)
-  bool x_is_float = (x_dtype == DataType::FLOAT || x_dtype == DataType::HALF);
-  bool w_is_float = (w_dtype == DataType::FLOAT || w_dtype == DataType::HALF);
-
-  if (x_is_float && w_is_float) {
-    // Use float32 for compute when inputs are float types with precision <= float32
-    return DataType::FLOAT;
-  }
-
-  return std::nullopt;
-}
-
-using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
-
-// Create TensorAttributes from a ConstValueInfo
-OrtStatus* CreateTensorAttr(
-    const OrtApi& ort_api,
-    Ort::ConstValueInfo value_info,
-    int64_t uid,
-    TensorAttrPtr& out_attr) {
-  using hipdnn_frontend::graph::TensorAttributes;
-
-  std::string name = value_info.GetName();
-
-  auto shape = GetTensorShape(value_info);
-  if (!shape.has_value()) {
-    RETURN_ERROR(ort_api, ORT_EP_FAIL, "Value must have static shape: " << name);
-  }
-
-  auto dtype = ToHipDNNDataType(GetTensorElementType(value_info));
-  if (!dtype.has_value()) {
-    RETURN_ERROR(ort_api, ORT_EP_FAIL, "Unsupported data type for value: " << name);
-  }
-
-  out_attr = std::make_shared<TensorAttributes>();
-  out_attr->set_uid(uid)
-      .set_name(name)
-      .set_data_type(dtype.value())
-      .set_dim(shape.value())
-      .set_stride(ComputeStrides(shape.value()));
-
-  return nullptr;
-}
-
-// Add Conv operation to hipDNN graph
-// Takes input tensor attributes (X, W), returns output tensor attribute (Y)
-OrtStatus* AddConvNode(
-    const OrtApi& ort_api,
-    hipdnn_frontend::graph::Graph& graph,
-    Ort::ConstNode node,
-    const std::vector<TensorAttrPtr>& input_attrs,
-    TensorAttrPtr& output_attr) {
-  using namespace hipdnn_frontend::graph;
-  using hipdnn_frontend::ConvolutionMode;
-
-  std::cerr << "AddConvNode 0" << std::endl;
-
-  if (input_attrs.size() < 2) {
-    RETURN_ERROR(ort_api, ORT_EP_FAIL, "Conv requires at least 2 input tensor attributes");
-  }
-
-  const auto& x_attr = input_attrs[0];
-  const auto& w_attr = input_attrs[1];
-
-  // Extract Conv attributes
-  std::vector<int64_t> pads = GetIntsAttrOrDefault(node, "pads", {0, 0, 0, 0});
-  std::vector<int64_t> strides = GetIntsAttrOrDefault(node, "strides", {1, 1});
-  std::vector<int64_t> dilations = GetIntsAttrOrDefault(node, "dilations", {1, 1});
-
-  // Normalize padding format
-  // ONNX can have [pad_h, pad_w] or [pad_h_begin, pad_w_begin, pad_h_end, pad_w_end]
-  if (pads.size() == 2) {
-    pads = {pads[0], pads[1], pads[0], pads[1]};
-  } else if (pads.size() != 4) {
-    RETURN_ERROR(ort_api, ORT_EP_FAIL, "Conv pads must have 2 or 4 elements");
-  }
-
-  // Determine compute data type from input data types
-  auto compute_dtype = GetComputeDataType(x_attr->get_data_type(), w_attr->get_data_type());
-  if (!compute_dtype.has_value()) {
-    RETURN_ERROR(ort_api, ORT_EP_FAIL, "Unsupported data type combination for Conv compute");
-  }
-
-  // Create convolution attributes
-  ConvFpropAttributes conv_attrs;
-  conv_attrs.set_padding({pads[0], pads[1]})  // Use begin padding
-      .set_stride({strides[0], strides[1]})
-      .set_dilation({dilations[0], dilations[1]})
-      .set_convolution_mode(ConvolutionMode::CROSS_CORRELATION)
-      .set_compute_data_type(compute_dtype.value());
-
-  // Add convolution to graph - returns output tensor attributes
-  output_attr = graph.conv_fprop(x_attr, w_attr, conv_attrs);
-
-  std::cerr << "AddConvNode 1" << std::endl;
-
-  return nullptr;
-}
-
-// Dispatch to appropriate Add*Node based on op_type
-// Takes input tensor attributes, returns output tensor attributes
-OrtStatus* AddNode(
-    const OrtApi& ort_api,
-    hipdnn_frontend::graph::Graph& graph,
-    Ort::ConstNode node,
-    const std::vector<TensorAttrPtr>& input_attrs,
-    std::vector<TensorAttrPtr>& output_attrs) {
-  std::string op_type = node.GetOperatorType();
-  std::cerr << "AddNode: " << op_type << std::endl;
-
-  if (op_type == "Conv") {
-    TensorAttrPtr y_attr;
-    RETURN_IF_ERROR(AddConvNode(ort_api, graph, node, input_attrs, y_attr));
-    output_attrs.push_back(y_attr);
-    return nullptr;
-  }
-
-  RETURN_ERROR(ort_api, ORT_EP_FAIL, "Unsupported op type: " << op_type);
 }
 
 }  // namespace
 
-//
-// Kernel implementation
-//
-
-Kernel::Kernel(const OrtApi& ort_api, const OrtLogger& logger, hipdnnHandle_t handle)
-    : ort_api_(ort_api), logger_(logger), handle_(handle) {
+Kernel::Kernel(const OrtApi& ort_api, const OrtLogger& logger)
+    : ort_api_(ort_api), logger_(logger) {
+  // Create MIOpen handle
+  miopenStatus_t status = miopenCreate(&miopen_handle_);
+  if (status != miopenStatusSuccess) {
+    std::cerr << "Failed to create MIOpen handle: " << status << std::endl;
+  }
 }
 
-Kernel::~Kernel() = default;
+Kernel::~Kernel() {
+  // Free workspace
+  if (workspace_ != nullptr) {
+    hipFree(workspace_);
+    workspace_ = nullptr;
+  }
+
+  // Destroy descriptors
+  if (x_desc_) miopenDestroyTensorDescriptor(x_desc_);
+  if (w_desc_) miopenDestroyTensorDescriptor(w_desc_);
+  if (y_desc_) miopenDestroyTensorDescriptor(y_desc_);
+  if (b_desc_) miopenDestroyTensorDescriptor(b_desc_);
+  if (conv_desc_) miopenDestroyConvolutionDescriptor(conv_desc_);
+
+  // Destroy MIOpen handle
+  if (miopen_handle_) {
+    miopenDestroy(miopen_handle_);
+    miopen_handle_ = nullptr;
+  }
+}
 
 OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
   try {
-    using namespace hipdnn_frontend::graph;
-    std::cerr << "BuildAndCompile 0" << std::endl;
+    std::cerr << "MIOpen Kernel::BuildAndCompile" << std::endl;
 
-    graph_ = std::make_unique<Graph>();
-
-    // Extract graph input/output info
+    // Get graph inputs and outputs
     std::vector<Ort::ConstValueInfo> graph_inputs = graph.GetInputs();
     std::vector<Ort::ConstValueInfo> graph_outputs = graph.GetOutputs();
-
-    // Create TensorAttributes for all graph inputs and add to symbol table
-    input_uids_.reserve(graph_inputs.size());
-    for (const auto& input : graph_inputs) {
-      TensorAttrPtr attr;
-      RETURN_IF_ERROR(CreateTensorAttr(ort_api_, input, next_uid_++, attr));
-      attr->set_is_virtual(false);
-      symbol_table_[input.GetName()] = attr;
-      input_uids_.push_back(attr->get_uid());
-    }
-
-    // Process each node in the graph
     std::vector<Ort::ConstNode> nodes = graph.GetNodes();
-    for (const auto& node : nodes) {
-      // Look up input TensorAttributes from symbol table
-      std::vector<Ort::ConstValueInfo> node_inputs = node.GetInputs();
-      std::vector<TensorAttrPtr> input_attrs;
-      input_attrs.reserve(node_inputs.size());
 
-      for (const auto& input : node_inputs) {
-        std::string name = input.GetName();
-        auto it = symbol_table_.find(name);
-        if (it == symbol_table_.end()) {
-          RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Input not found in symbol table: " << name);
-        }
-        input_attrs.push_back(it->second);
+    if (nodes.empty()) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Empty graph");
+    }
+
+    num_inputs_ = graph_inputs.size();
+    num_outputs_ = graph_outputs.size();
+
+    // We expect a single Conv node
+    Ort::ConstNode conv_node = nodes[0];
+    std::string op_type = conv_node.GetOperatorType();
+    if (op_type != "Conv") {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Expected Conv node, got: " << op_type);
+    }
+
+    // Get node inputs
+    std::vector<Ort::ConstValueInfo> node_inputs = conv_node.GetInputs();
+    std::vector<Ort::ConstValueInfo> node_outputs = conv_node.GetOutputs();
+
+    if (node_inputs.size() < 2) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Conv requires at least 2 inputs");
+    }
+
+    has_bias_ = node_inputs.size() >= 3;
+
+    // Get input shape (X)
+    auto x_shape_opt = GetTensorShape(node_inputs[0]);
+    if (!x_shape_opt.has_value()) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Input must have static shape");
+    }
+    x_shape_ = x_shape_opt.value();
+
+    // Get weight shape (W)
+    auto w_shape_opt = GetTensorShape(node_inputs[1]);
+    if (!w_shape_opt.has_value()) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Weight must have static shape");
+    }
+    w_shape_ = w_shape_opt.value();
+
+    // Get bias shape (B) if present
+    if (has_bias_) {
+      auto b_shape_opt = GetTensorShape(node_inputs[2]);
+      if (!b_shape_opt.has_value()) {
+        RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Bias must have static shape");
       }
+      b_shape_ = b_shape_opt.value();
+    }
 
-      // Add the node to hipDNN graph
-      std::vector<TensorAttrPtr> output_attrs;
-      RETURN_IF_ERROR(AddNode(ort_api_, *graph_, node, input_attrs, output_attrs));
+    // Get output shape (Y)
+    auto y_shape_opt = GetTensorShape(node_outputs[0]);
+    if (!y_shape_opt.has_value()) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Output must have static shape");
+    }
+    y_shape_ = y_shape_opt.value();
+    output_shapes_.push_back(y_shape_);
 
-      // Set UID, name on output TensorAttributes and add to symbol table
-      std::vector<Ort::ConstValueInfo> node_outputs = node.GetOutputs();
-      if (output_attrs.size() != node_outputs.size()) {
-        RETURN_ERROR(ort_api_, ORT_EP_FAIL,
-                     "Output count mismatch for node " << node.GetName() << ": expected " << node_outputs.size() << ", got " << output_attrs.size());
-      }
+    // Get data type
+    data_type_ = ToMIOpenDataType(GetTensorElementType(node_inputs[0]));
 
-      for (size_t i = 0; i < output_attrs.size(); ++i) {
-        std::string name = node_outputs[i].GetName();
+    // Get convolution attributes
+    std::vector<int64_t> pads = GetIntsAttrOrDefault(conv_node, "pads", {0, 0, 0, 0});
+    std::vector<int64_t> strides = GetIntsAttrOrDefault(conv_node, "strides", {1, 1});
+    std::vector<int64_t> dilations = GetIntsAttrOrDefault(conv_node, "dilations", {1, 1});
 
-        // Get output data type
-        auto dtype = ToHipDNNDataType(GetTensorElementType(node_outputs[i]));
-        if (!dtype.has_value()) {
-          RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Unsupported data type for output: " << name);
-        }
+    // Normalize pads
+    if (pads.size() == 2) {
+      pads = {pads[0], pads[1], pads[0], pads[1]};
+    }
 
-        // Get output shape for strides
-        auto shape = GetTensorShape(node_outputs[i]);
-        if (!shape.has_value()) {
-          RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Output must have static shape: " << name);
-        }
+    std::cerr << "Input shape: [" << x_shape_[0] << ", " << x_shape_[1] << ", " 
+              << x_shape_[2] << ", " << x_shape_[3] << "]" << std::endl;
+    std::cerr << "Weight shape: [" << w_shape_[0] << ", " << w_shape_[1] << ", " 
+              << w_shape_[2] << ", " << w_shape_[3] << "]" << std::endl;
+    std::cerr << "Output shape: [" << y_shape_[0] << ", " << y_shape_[1] << ", " 
+              << y_shape_[2] << ", " << y_shape_[3] << "]" << std::endl;
+    std::cerr << "Has bias: " << has_bias_ << std::endl;
 
-        output_attrs[i]->set_uid(next_uid_++).set_name(name).set_data_type(dtype.value()).set_dim(shape.value()).set_stride(ComputeStrides(shape.value()));
-        symbol_table_[name] = output_attrs[i];
+    // Create tensor descriptors
+    MIOPEN_RETURN_IF_ERROR(ort_api_, miopenCreateTensorDescriptor(&x_desc_));
+    MIOPEN_RETURN_IF_ERROR(ort_api_, miopenCreateTensorDescriptor(&w_desc_));
+    MIOPEN_RETURN_IF_ERROR(ort_api_, miopenCreateTensorDescriptor(&y_desc_));
+
+    // Set tensor descriptors (NCHW format)
+    MIOPEN_RETURN_IF_ERROR(ort_api_, miopenSet4dTensorDescriptor(
+        x_desc_, data_type_,
+        static_cast<int>(x_shape_[0]), static_cast<int>(x_shape_[1]),
+        static_cast<int>(x_shape_[2]), static_cast<int>(x_shape_[3])));
+
+    MIOPEN_RETURN_IF_ERROR(ort_api_, miopenSet4dTensorDescriptor(
+        w_desc_, data_type_,
+        static_cast<int>(w_shape_[0]), static_cast<int>(w_shape_[1]),
+        static_cast<int>(w_shape_[2]), static_cast<int>(w_shape_[3])));
+
+    MIOPEN_RETURN_IF_ERROR(ort_api_, miopenSet4dTensorDescriptor(
+        y_desc_, data_type_,
+        static_cast<int>(y_shape_[0]), static_cast<int>(y_shape_[1]),
+        static_cast<int>(y_shape_[2]), static_cast<int>(y_shape_[3])));
+
+    // Create and set bias descriptor if needed
+    if (has_bias_) {
+      MIOPEN_RETURN_IF_ERROR(ort_api_, miopenCreateTensorDescriptor(&b_desc_));
+      // Bias is 1D [C], we set it as [1, C, 1, 1] for broadcasting
+      // Use explicit strides for proper broadcasting behavior
+      int b_dims[4] = {1, static_cast<int>(b_shape_[0]), 1, 1};
+      int b_strides[4] = {static_cast<int>(b_shape_[0]), 1, 1, 1};
+      MIOPEN_RETURN_IF_ERROR(ort_api_, miopenSetTensorDescriptor(
+          b_desc_, data_type_, 4, b_dims, b_strides));
+    }
+
+    // Create convolution descriptor
+    MIOPEN_RETURN_IF_ERROR(ort_api_, miopenCreateConvolutionDescriptor(&conv_desc_));
+    MIOPEN_RETURN_IF_ERROR(ort_api_, miopenInitConvolutionDescriptor(
+        conv_desc_,
+        miopenConvolution,  // mode
+        static_cast<int>(pads[0]),      // pad_h
+        static_cast<int>(pads[1]),      // pad_w
+        static_cast<int>(strides[0]),   // stride_h
+        static_cast<int>(strides[1]),   // stride_w
+        static_cast<int>(dilations[0]), // dilation_h
+        static_cast<int>(dilations[1])  // dilation_w
+    ));
+
+    // Get workspace size first
+    MIOPEN_RETURN_IF_ERROR(ort_api_, miopenConvolutionForwardGetWorkSpaceSize(
+        miopen_handle_,
+        w_desc_,
+        x_desc_,
+        conv_desc_,
+        y_desc_,
+        &workspace_size_));
+
+    std::cerr << "Workspace size: " << workspace_size_ << std::endl;
+
+    // Allocate workspace
+    if (workspace_size_ > 0) {
+      hipError_t hip_err = hipMalloc(&workspace_, workspace_size_);
+      if (hip_err != hipSuccess) {
+        RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Failed to allocate workspace: " << hipGetErrorString(hip_err));
       }
     }
 
-    // Mark graph outputs as non-virtual and store their UIDs
-    output_uids_.reserve(graph_outputs.size());
-    output_shapes_.reserve(graph_outputs.size());
-    for (const auto& output : graph_outputs) {
-      std::string name = output.GetName();
-      auto it = symbol_table_.find(name);
-      if (it == symbol_table_.end()) {
-        RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Graph output not found in symbol table: " << name);
-      }
-      it->second->set_is_virtual(false);
-      output_uids_.push_back(it->second->get_uid());
-
-      auto shape = GetTensorShape(output);
-      if (!shape.has_value()) {
-        RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Graph output must have static shape: " << name);
-      }
-      output_shapes_.push_back(shape.value());
+    // Allocate temporary GPU buffers for finding algorithm
+    void* x_tmp = nullptr;
+    void* w_tmp = nullptr;
+    void* y_tmp = nullptr;
+    
+    size_t x_size = x_shape_[0] * x_shape_[1] * x_shape_[2] * x_shape_[3] * sizeof(float);
+    size_t w_size = w_shape_[0] * w_shape_[1] * w_shape_[2] * w_shape_[3] * sizeof(float);
+    size_t y_size = y_shape_[0] * y_shape_[1] * y_shape_[2] * y_shape_[3] * sizeof(float);
+    
+    if (data_type_ == miopenHalf) {
+      x_size /= 2;
+      w_size /= 2;
+      y_size /= 2;
     }
 
-    // Compile the graph
-    RETURN_IF_ERROR(CompileGraph());
+    hipError_t hip_err = hipMalloc(&x_tmp, x_size);
+    if (hip_err != hipSuccess) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Failed to allocate x_tmp: " << hipGetErrorString(hip_err));
+    }
+    
+    hip_err = hipMalloc(&w_tmp, w_size);
+    if (hip_err != hipSuccess) {
+      hipFree(x_tmp);
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Failed to allocate w_tmp: " << hipGetErrorString(hip_err));
+    }
+    
+    hip_err = hipMalloc(&y_tmp, y_size);
+    if (hip_err != hipSuccess) {
+      hipFree(x_tmp);
+      hipFree(w_tmp);
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Failed to allocate y_tmp: " << hipGetErrorString(hip_err));
+    }
 
-    std::cerr << "BuildAndCompile 1" << std::endl;
+    // Find the best convolution algorithm (required by MIOpen)
+    const int request_algo_count = 4;
+    int returned_algo_count = 0;
+    miopenConvAlgoPerf_t perf_results[request_algo_count];
+
+    std::cerr << "Finding convolution algorithm..." << std::endl;
+    miopenStatus_t find_status = miopenFindConvolutionForwardAlgorithm(
+        miopen_handle_,
+        x_desc_,
+        x_tmp,
+        w_desc_,
+        w_tmp,
+        conv_desc_,
+        y_desc_,
+        y_tmp,
+        request_algo_count,
+        &returned_algo_count,
+        perf_results,
+        workspace_,
+        workspace_size_,
+        false  // exhaustiveSearch
+    );
+
+    // Free temporary buffers
+    hipFree(x_tmp);
+    hipFree(w_tmp);
+    hipFree(y_tmp);
+
+    if (find_status != miopenStatusSuccess) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "miopenFindConvolutionForwardAlgorithm failed: " << find_status);
+    }
+
+    if (returned_algo_count == 0) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "No convolution algorithm found");
+    }
+
+    // Use the best algorithm found
+    conv_algo_ = perf_results[0].fwd_algo;
+    std::cerr << "Selected algorithm: " << conv_algo_ << ", time: " << perf_results[0].time << " ms" << std::endl;
+
+    std::cerr << "MIOpen Kernel::BuildAndCompile complete" << std::endl;
+
   } catch (const std::exception& ex) {
-    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Exception building hipDNN graph: " << ex.what());
+    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Exception building MIOpen kernel: " << ex.what());
   }
-
-  return nullptr;
-}
-
-OrtStatus* Kernel::CompileGraph() {
-  using hipdnn_frontend::HeuristicMode;
-
-  std::cerr << "CompileGraph 0" << std::endl;
-
-  auto error = graph_->validate();
-  if (error.is_bad()) {
-    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "hipDNN graph validation failed: " << error.get_message());
-  }
-
-  error = graph_->build_operation_graph(handle_);
-  if (error.is_bad()) {
-    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "hipDNN build_operation_graph failed: " << error.get_message());
-  }
-
-  error = graph_->create_execution_plans({HeuristicMode::FALLBACK});
-  if (error.is_bad()) {
-    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "hipDNN create_execution_plans failed: " << error.get_message());
-  }
-
-  error = graph_->check_support();
-  if (error.is_bad()) {
-    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "hipDNN check_support failed: " << error.get_message());
-  }
-
-  error = graph_->build_plans();
-  if (error.is_bad()) {
-    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "hipDNN build_plans failed: " << error.get_message());
-  }
-
-  // Get workspace size
-  int64_t workspace_size = 0;
-  error = graph_->get_workspace_size(workspace_size);
-  if (error.is_bad()) {
-    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "hipDNN get_workspace_size failed: " << error.get_message());
-  }
-
-  if (workspace_size > 0) {
-    workspace_.resize(workspace_size);
-  }
-
-  std::cerr << "CompileGraph 1" << std::endl;
 
   return nullptr;
 }
 
 OrtStatus* Kernel::Execute(OrtKernelContext* kernel_ctx) {
   try {
-    std::cerr << "Execute 0" << std::endl;
+    std::cerr << "MIOpen Kernel::Execute" << std::endl;
 
     Ort::KernelContext context(kernel_ctx);
 
-    // Validate input/output counts match what we compiled for
-    if (context.GetInputCount() != input_uids_.size()) {
-      RETURN_ERROR(ort_api_, ORT_EP_FAIL,
-                   "Input count mismatch: expected " << input_uids_.size() << ", got " << context.GetInputCount());
-    }
-    if (context.GetOutputCount() != output_uids_.size()) {
-      RETURN_ERROR(ort_api_, ORT_EP_FAIL,
-                   "Output count mismatch: expected " << output_uids_.size() << ", got " << context.GetOutputCount());
+    // Validate input/output counts
+    if (context.GetInputCount() < 2) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Expected at least 2 inputs, got " << context.GetInputCount());
     }
 
-    // Build variant pack mapping UIDs to data pointers
-    std::unordered_map<int64_t, void*> variant_pack;
+    // Get input pointers
+    Ort::ConstValue x_tensor = context.GetInput(0);
+    Ort::ConstValue w_tensor = context.GetInput(1);
+    const void* x_ptr = x_tensor.GetTensorRawData();
+    const void* w_ptr = w_tensor.GetTensorRawData();
 
-    // Map graph inputs to their UIDs
-    for (size_t i = 0; i < input_uids_.size(); ++i) {
-      Ort::ConstValue input = context.GetInput(i);
-      variant_pack[input_uids_[i]] = const_cast<void*>(input.GetTensorRawData());
+    // Allocate output
+    Ort::UnownedValue y_tensor = context.GetOutput(0, output_shapes_[0]);
+    void* y_ptr = y_tensor.GetTensorMutableRawData();
+
+    // Scaling factors
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    miopenStatus_t status;
+
+    // Execute convolution: y = conv(x, w)
+    // Note: MIOpen only supports alpha=1 and beta=0 for 2D convolutions
+    std::cerr << "Executing miopenConvolutionForward..." << std::endl;
+    
+    status = miopenConvolutionForward(
+        miopen_handle_,
+        &alpha,
+        x_desc_,
+        x_ptr,
+        w_desc_,
+        w_ptr,
+        conv_desc_,
+        conv_algo_,
+        &beta,
+        y_desc_,
+        y_ptr,
+        workspace_,
+        workspace_size_);
+
+    if (status != miopenStatusSuccess) {
+      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "miopenConvolutionForward failed: " << status);
     }
 
-    // Allocate outputs and map to their UIDs
-    for (size_t i = 0; i < output_uids_.size(); ++i) {
-      Ort::UnownedValue output = context.GetOutput(i, output_shapes_[i]);
-      variant_pack[output_uids_[i]] = output.GetTensorMutableRawData();
+    // Add bias if present: y = y + bias
+    if (has_bias_ && context.GetInputCount() >= 3) {
+      std::cerr << "Adding bias with miopenOpTensor..." << std::endl;
+      
+      Ort::ConstValue b_tensor = context.GetInput(2);
+      const void* b_ptr = b_tensor.GetTensorRawData();
+
+      // y = 1*y + 1*bias + 0*y = y + bias
+      float alpha1 = 1.0f;
+      float alpha2 = 1.0f;
+      float beta_op = 0.0f;
+      
+      status = miopenOpTensor(
+          miopen_handle_,
+          miopenTensorOpAdd,
+          &alpha1,
+          y_desc_,
+          y_ptr,
+          &alpha2,
+          b_desc_,
+          b_ptr,
+          &beta_op,
+          y_desc_,
+          y_ptr);
+
+      if (status != miopenStatusSuccess) {
+        RETURN_ERROR(ort_api_, ORT_EP_FAIL, "miopenOpTensor (bias add) failed: " << status);
+      }
     }
 
-    // Execute
-    void* workspace_ptr = workspace_.empty() ? nullptr : workspace_.data();
-    auto error = graph_->execute(handle_, variant_pack, workspace_ptr);
-    if (error.is_bad()) {
-      RETURN_ERROR(ort_api_, ORT_EP_FAIL, "hipDNN execute failed: " << error.get_message());
-    }
+    std::cerr << "MIOpen Kernel::Execute complete" << std::endl;
 
-    std::cerr << "Execute 1" << std::endl;
   } catch (const Ort::Exception& ex) {
     Ort::Status status(ex);
     return status.release();
   } catch (const std::exception& ex) {
-    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Exception in Kernel::Execute: " << ex.what());
+    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Exception in MIOpen Kernel::Execute: " << ex.what());
   }
 
   return nullptr;

@@ -3,6 +3,7 @@
 
 #include "hipdnn_ep/ep_factory.h"
 #include "hipdnn_ep/ep.h"
+#include "hipdnn_ep/memcpy_kernel.h"
 #include <hip/hip_runtime.h>
 
 namespace hipdnn_ep {
@@ -67,6 +68,24 @@ HipDNNEpFactory::HipDNNEpFactory(const char* ep_name, ApiPtrs apis, const OrtLog
   // Create data transfer
   const OrtMemoryDevice* device = ep_api.MemoryInfo_GetMemoryDevice(default_memory_info_);
   data_transfer_impl_ = std::make_unique<HipDataTransfer>(apis, device, device_id_);
+
+  // Create kernel registry and register memcpy kernels
+  Ort::Status status{ep_api.CreateKernelRegistry(&kernel_registry_)};
+  if (!status.IsOK()) {
+    throw std::runtime_error(std::string("Failed to create kernel registry: ") + status.GetErrorMessage());
+  }
+
+  status = Ort::Status{RegisterMemcpyKernels(*this, kernel_registry_, ep_name_.c_str())};
+  if (!status.IsOK()) {
+    throw std::runtime_error(std::string("Failed to register memcpy kernels: ") + status.GetErrorMessage());
+  }
+}
+
+HipDNNEpFactory::~HipDNNEpFactory() {
+  if (kernel_registry_) {
+    ep_api.ReleaseKernelRegistry(kernel_registry_);
+    kernel_registry_ = nullptr;
+  }
 }
 
 /*static*/

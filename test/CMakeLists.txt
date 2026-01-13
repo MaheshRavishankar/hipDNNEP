@@ -45,15 +45,21 @@ target_link_libraries(hipdnn_ep_tests PRIVATE
   # dl
 )
 
-# Copy test model to build directory
+# Copy test models to build directory
 set(CONV_TEST_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/conv_test.onnx")
 if(EXISTS "${CONV_TEST_MODEL}")
   configure_file("${CONV_TEST_MODEL}" "${CMAKE_CURRENT_BINARY_DIR}/conv_test.onnx" COPYONLY)
 endif()
 
+set(CONV_BIAS_TEST_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/conv_bias_test.onnx")
+if(EXISTS "${CONV_BIAS_TEST_MODEL}")
+  configure_file("${CONV_BIAS_TEST_MODEL}" "${CMAKE_CURRENT_BINARY_DIR}/conv_bias_test.onnx" COPYONLY)
+endif()
+
 target_compile_definitions(hipdnn_ep_tests PRIVATE
   HIPDNN_EP_LIB_PATH="$<TARGET_FILE:hipdnn_ep>"
   CONV_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/conv_test.onnx"
+  CONV_BIAS_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/conv_bias_test.onnx"
   ORT_API_MANUAL_INIT
 )
 
