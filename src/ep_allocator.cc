@@ -4,6 +4,8 @@
 #include "hipdnn_ep/ep_allocator.h"
 #include <hip/hip_runtime.h>
 
+#include <iostream>
+
 namespace hipdnn_ep {
 
 namespace {
@@ -34,6 +36,7 @@ HipDeviceAllocator::HipDeviceAllocator(const OrtMemoryInfo* mem_info, const ApiP
 /*static*/
 void* ORT_API_CALL HipDeviceAllocator::AllocImpl(struct OrtAllocator* this_, size_t size) {
   auto& impl = *static_cast<HipDeviceAllocator*>(this_);
+  std::cerr << "HipDeviceAllocator::AllocImpl: " << impl.stats_.num_allocs << ", " << size << std::endl;
 
   // TODO: Make allocator stream-aware. Currently using hipSetDevice which is
   // ad-hoc and affects per-thread state. Should use hipMallocAsync with a
@@ -41,12 +44,15 @@ void* ORT_API_CALL HipDeviceAllocator::AllocImpl(struct OrtAllocator* this_, siz
   hipError_t err = hipSetDevice(impl.device_id_);
   if (err != hipSuccess) {
     // Can't return error from Alloc, return nullptr
+    std::cerr << "hipSetDevice error" << std::endl;
     return nullptr;
   }
 
+  
   void* ptr = nullptr;
   err = hipMalloc(&ptr, size);
   if (err != hipSuccess) {
+    std::cerr << "hipMalloc error" << std::endl;
     return nullptr;
   }
 
@@ -71,16 +77,19 @@ void ORT_API_CALL HipDeviceAllocator::FreeImpl(struct OrtAllocator* this_, void*
   }
 
   auto& impl = *static_cast<HipDeviceAllocator*>(this_);
+  std::cerr << "HipDeviceAllocator::FreeImpl: " << impl.allocation_sizes_[p] << std::endl;
 
   hipError_t err = hipSetDevice(impl.device_id_);
   if (err != hipSuccess) {
     // Can't proceed without setting the correct device
+    std::cerr << "hipSetDevice error" << std::endl;
     return;
   }
 
   err = hipFree(p);
   if (err != hipSuccess) {
     // hipFree failed - still update our tracking to avoid memory leaks in stats
+    std::cerr << "hipFree error" << std::endl;
   }
 
   // Update tracking and stats

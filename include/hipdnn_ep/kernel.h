@@ -9,48 +9,58 @@
 #include <unordered_map>
 #include <vector>
 
-// hipDNN includes
-#include <hipdnn_backend.h>
-#include <hipdnn_frontend.hpp>
+// MIOpen includes
+#include <miopen/miopen.h>
+#include <hip/hip_runtime.h>
 
 namespace hipdnn_ep {
 
-/// @brief Generic kernel that builds and executes hipDNN graphs
+/// @brief Generic kernel that builds and executes operations using MIOpen
 struct Kernel {
-  Kernel(const OrtApi& ort_api, const OrtLogger& logger, hipdnnHandle_t handle);
+  Kernel(const OrtApi& ort_api, const OrtLogger& logger);
   ~Kernel();
 
-  /// @brief Build and compile hipDNN graph from an ORT graph
+  /// @brief Build and compile from an ORT graph
   OrtStatus* BuildAndCompile(Ort::ConstGraph graph);
 
-  /// @brief Execute the compiled graph
+  /// @brief Execute the compiled operations
   OrtStatus* Execute(OrtKernelContext* kernel_ctx);
 
  private:
-  /// @brief Compile the hipDNN graph after all ops are added
-  OrtStatus* CompileGraph();
-
   const OrtApi& ort_api_;
   const OrtLogger& logger_;
-  hipdnnHandle_t handle_;
 
-  // hipDNN graph
-  std::unique_ptr<hipdnn_frontend::graph::Graph> graph_;
+  // MIOpen handle
+  miopenHandle_t miopen_handle_{nullptr};
 
-  // Workspace
-  std::vector<char> workspace_;
+  // Convolution descriptors
+  miopenTensorDescriptor_t x_desc_{nullptr};  // Input
+  miopenTensorDescriptor_t w_desc_{nullptr};  // Weights
+  miopenTensorDescriptor_t y_desc_{nullptr};  // Output
+  miopenTensorDescriptor_t b_desc_{nullptr};  // Bias (optional)
+  miopenConvolutionDescriptor_t conv_desc_{nullptr};
 
-  // Graph input/output info (stored at compile time)
-  std::vector<int64_t> input_uids_;   // UID for each graph input
-  std::vector<int64_t> output_uids_;  // UID for each graph output
+  // Convolution algorithm and workspace
+  miopenConvFwdAlgorithm_t conv_algo_{miopenConvolutionFwdAlgoGEMM};
+  size_t workspace_size_{0};
+  void* workspace_{nullptr};
+
+  // Tensor shapes
+  std::vector<int64_t> x_shape_;
+  std::vector<int64_t> w_shape_;
+  std::vector<int64_t> y_shape_;
+  std::vector<int64_t> b_shape_;
+
+  // Graph I/O info
+  size_t num_inputs_{0};
+  size_t num_outputs_{0};
   std::vector<std::vector<int64_t>> output_shapes_;
 
-  // Symbol table: maps value name to TensorAttributes
-  using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
-  std::unordered_map<std::string, TensorAttrPtr> symbol_table_;
+  // Bias support
+  bool has_bias_{false};
 
-  // UID counter for tensor attributes
-  int64_t next_uid_{1};
+  // Data type
+  miopenDataType_t data_type_{miopenFloat};
 };
 
 }  // namespace hipdnn_ep

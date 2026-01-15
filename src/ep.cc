@@ -6,7 +6,7 @@
 #include "hipdnn_ep/kernel.h"
 #include "hipdnn_ep/node_compute_info.h"
 
-#include <hipdnn_backend.h>
+#include <iostream>
 
 namespace hipdnn_ep {
 
@@ -35,6 +35,20 @@ static bool IsSupportedConv(Ort::ConstNode node) {
 
     if (!supported_type) {
       return false;
+    }
+
+    // If bias is present, check its data type matches
+    if (inputs.size() >= 3) {
+      ONNXTensorElementDataType b_type = GetTensorElementType(inputs[2]);
+      if (b_type != x_type) {
+        return false;  // Bias must have same data type as input
+      }
+
+      // Check bias shape - should be 1D with size matching output channels
+      auto b_shape = GetTensorShape(inputs[2]);
+      if (!b_shape.has_value() || b_shape->size() != 1) {
+        return false;  // Bias must be 1D tensor
+      }
     }
 
     // Check if it's a 2D convolution (4D tensors: NCHW)
@@ -104,26 +118,16 @@ HipDNNEp::HipDNNEp(HipDNNEpFactory& factory, const Config& config, const OrtLogg
   ReleaseNodeComputeInfos = ReleaseNodeComputeInfosImpl;
   CreateAllocator = CreateAllocatorImpl;
   CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
-
-  // Initialize hipDNN
-  hipdnnStatus_t status = hipdnnCreate(&hipdnn_handle_);
-  if (status != HIPDNN_STATUS_SUCCESS) {
-    throw std::runtime_error("Failed to create hipDNN handle");
-  }
+  GetKernelRegistry = GetKernelRegistryImpl;
 
   IGNORE_ORTSTATUS(ort_api.Logger_LogMessage(
       &logger_, ORT_LOGGING_LEVEL_INFO,
-      (std::string("HipDNN EP created: ") + factory_.GetName(&factory_)).c_str(),
+      (std::string("MIOpen EP created: ") + factory_.GetName(&factory_)).c_str(),
       EP_FILE, __LINE__, __FUNCTION__));
 }
 
 HipDNNEp::~HipDNNEp() {
   kernels_.clear();
-
-  if (hipdnn_handle_) {
-    hipdnnDestroy(hipdnn_handle_);
-    hipdnn_handle_ = nullptr;
-  }
 }
 
 Kernel* HipDNNEp::GetKernel(const std::string& name) {
@@ -217,12 +221,13 @@ OrtStatus* ORT_API_CALL HipDNNEp::CompileImpl(
         RETURN_ERROR(ep->ort_api, ORT_EP_FAIL, "Empty graph provided for compilation");
       }
 
-      // Create kernel and build/compile the hipDNN graph
-      auto kernel = std::make_unique<Kernel>(ep->ort_api, ep->logger_, ep->hipdnn_handle_);
+      // Create kernel and build/compile using MIOpen
+      auto kernel = std::make_unique<Kernel>(ep->ort_api, ep->logger_);
       RETURN_IF_ERROR(kernel->BuildAndCompile(graph));
 
       std::string fused_node_name = fused_node.GetName();
       ep->kernels_.emplace(fused_node_name, std::move(kernel));
+      std::cerr << "HipDNNEp::CompileImpl: " << fused_node_name << std::endl;
 
       // Create node compute info
       auto compute_info = std::make_unique<NodeComputeInfo>(*ep);
@@ -266,6 +271,15 @@ OrtStatus* ORT_API_CALL HipDNNEp::CreateSyncStreamForDeviceImpl(
     OrtSyncStreamImpl** stream) noexcept {
   // TODO: Implement stream support
   *stream = nullptr;
+  return nullptr;
+}
+
+/*static*/
+OrtStatus* ORT_API_CALL HipDNNEp::GetKernelRegistryImpl(
+    OrtEp* this_ptr,
+    const OrtKernelRegistry** kernel_registry) noexcept {
+  auto* ep = static_cast<HipDNNEp*>(this_ptr);
+  *kernel_registry = ep->factory_.GetKernelRegistry();
   return nullptr;
 }
 

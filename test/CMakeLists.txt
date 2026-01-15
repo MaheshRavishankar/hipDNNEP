@@ -15,16 +15,16 @@ if(NOT GTest_FOUND)
 endif()
 
 # ONNXRuntime library for testing
-set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/build/RelWithDebInfo" CACHE PATH "ONNXRuntime library directory")
+# set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/build/RelWithDebInfo" CACHE PATH "ONNXRuntime library directory")
 
-find_library(ONNXRUNTIME_LIB onnxruntime
-  HINTS ${ONNXRUNTIME_LIB_DIR}
-)
+# find_library(ONNXRUNTIME_LIB onnxruntime
+#   HINTS ${ONNXRUNTIME_LIB_DIR}
+# )
 
-if(NOT ONNXRUNTIME_LIB)
-  message(WARNING "ONNXRuntime library not found at ${ONNXRUNTIME_LIB_DIR}. Tests will not be built.")
-  return()
-endif()
+# if(NOT ONNXRUNTIME_LIB)
+#   message(WARNING "ONNXRuntime library not found at ${ONNXRUNTIME_LIB_DIR}. Tests will not be built.")
+#   return()
+# endif()
 
 # Test executable
 add_executable(hipdnn_ep_tests
@@ -32,30 +32,68 @@ add_executable(hipdnn_ep_tests
   test_conv.cc
 )
 
-target_include_directories(hipdnn_ep_tests PRIVATE
-  ${ONNXRUNTIME_INCLUDE_DIR}
-)
+# target_include_directories(hipdnn_ep_tests PRIVATE
+#   ${ONNXRUNTIME_INCLUDE_DIR}
+# )
 
 target_link_libraries(hipdnn_ep_tests PRIVATE
   GTest::gtest
   GTest::gtest_main
-  ${ONNXRUNTIME_LIB}
+  # ${ONNXRUNTIME_LIB}
+  onnxruntime::onnxruntime
   hip::host
-  dl
+  # dl
 )
 
-# Copy test model to build directory
+# Copy test models to build directory
 set(CONV_TEST_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/conv_test.onnx")
 if(EXISTS "${CONV_TEST_MODEL}")
   configure_file("${CONV_TEST_MODEL}" "${CMAKE_CURRENT_BINARY_DIR}/conv_test.onnx" COPYONLY)
 endif()
 
+set(CONV_BIAS_TEST_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/conv_bias_test.onnx")
+if(EXISTS "${CONV_BIAS_TEST_MODEL}")
+  configure_file("${CONV_BIAS_TEST_MODEL}" "${CMAKE_CURRENT_BINARY_DIR}/conv_bias_test.onnx" COPYONLY)
+endif()
+
 target_compile_definitions(hipdnn_ep_tests PRIVATE
   HIPDNN_EP_LIB_PATH="$<TARGET_FILE:hipdnn_ep>"
   CONV_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/conv_test.onnx"
+  CONV_BIAS_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/conv_bias_test.onnx"
   ORT_API_MANUAL_INIT
 )
 
 # Add test
 include(GoogleTest)
 gtest_discover_tests(hipdnn_ep_tests)
+
+# Standalone MIOpen test - demonstrates direct MIOpen API usage for conv and conv+bias
+add_executable(miopen_conv_tests
+  test_miopen_conv.cc
+)
+
+target_link_libraries(miopen_conv_tests PRIVATE
+  GTest::gtest
+  GTest::gtest_main
+  MIOpen
+  hip::host
+)
+
+# gtest_discover_tests(miopen_conv_tests)
+
+# Standalone hipDNN test - demonstrates direct hipDNN frontend API usage for conv and conv+bias
+add_executable(hipdnn_conv_tests
+  test_hipdnn_conv.cc
+)
+
+target_link_libraries(hipdnn_conv_tests PRIVATE
+  GTest::gtest
+  GTest::gtest_main
+  hipdnn_frontend
+  hip::host
+)
+
+target_compile_options(hipdnn_conv_tests PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+target_compile_options(hipdnn_conv_tests PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/Zc:__cplusplus>")
+
+# gtest_discover_tests(hipdnn_conv_tests)

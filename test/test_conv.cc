@@ -13,11 +13,16 @@
 #include "onnxruntime_cxx_api.h"
 
 #ifndef HIPDNN_EP_LIB_PATH
-#define HIPDNN_EP_LIB_PATH "./libhipdnn_ep.so"
+// #define HIPDNN_EP_LIB_PATH "./libhipdnn_ep.so"
+#define HIPDNN_EP_LIB_PATH "./hipdnn_ep.dll"
 #endif
 
 #ifndef CONV_TEST_MODEL_PATH
 #define CONV_TEST_MODEL_PATH "./conv_test.onnx"
+#endif
+
+#ifndef CONV_BIAS_TEST_MODEL_PATH
+#define CONV_BIAS_TEST_MODEL_PATH "./conv_bias_test.onnx"
 #endif
 
 class HipDNNConvTest : public ::testing::Test {
@@ -27,9 +32,9 @@ class HipDNNConvTest : public ::testing::Test {
     env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "HipDNNConvTest");
 
     // Register EP
-    const char* lib_path = HIPDNN_EP_LIB_PATH;
+    // const char* lib_path = ORT_TSTR_ON_MACRO(HIPDNN_EP_LIB_PATH);
     OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
-        *env_, "HipDNN", lib_path);
+        *env_, "HipDNN", ORT_TSTR_ON_MACRO(HIPDNN_EP_LIB_PATH));
 
     if (status != nullptr) {
       std::string error_msg = Ort::GetApi().GetErrorMessage(status);
@@ -46,6 +51,7 @@ class HipDNNConvTest : public ::testing::Test {
     if (!model_available_) {
       std::cout << "Model not available at: " << CONV_TEST_MODEL_PATH << std::endl;
     }
+    std::cout << "CONV_TEST_MODEL_PATH: " << CONV_TEST_MODEL_PATH << std::endl;
   }
 
   void TearDown() override {
@@ -57,9 +63,9 @@ class HipDNNConvTest : public ::testing::Test {
   bool model_available_{false};
 };
 
-// Simple reference Conv2D implementation for verification
+// Simple reference Conv2D implementation for verification (with optional bias)
 void ReferenceConv2D(
-    const float* input, const float* weight, float* output,
+    const float* input, const float* weight, const float* bias, float* output,
     int N, int C_in, int H_in, int W_in,
     int C_out, int K_h, int K_w,
     int pad_h, int pad_w,
@@ -86,6 +92,11 @@ void ReferenceConv2D(
                 }
               }
             }
+          }
+
+          // Add bias if present
+          if (bias != nullptr) {
+            sum += bias[c_out];
           }
 
           int output_idx = n * C_out * H_out * W_out + c_out * H_out * W_out + h_out * W_out + w_out;
@@ -115,7 +126,7 @@ TEST_F(HipDNNConvTest, BasicConv2D) {
   std::vector<float> cpu_output;
   {
     Ort::SessionOptions session_options;
-    Ort::Session session(*env_, CONV_TEST_MODEL_PATH, session_options);
+    Ort::Session session(*env_, ORT_TSTR_ON_MACRO(CONV_TEST_MODEL_PATH), session_options);
 
     auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
@@ -170,7 +181,7 @@ TEST_F(HipDNNConvTest, BasicConv2D) {
     }
 
     std::cout << "Creating session with HipDNN EP..." << std::endl;
-    Ort::Session session(*env_, CONV_TEST_MODEL_PATH, session_options);
+    Ort::Session session(*env_, ORT_TSTR_ON_MACRO(CONV_TEST_MODEL_PATH), session_options);
     std::cout << "Session created successfully" << std::endl;
 
     auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
@@ -227,7 +238,7 @@ TEST_F(HipDNNConvTest, ReferenceConvCorrectness) {
   int W_out = (W_in - K_w) / stride_w + 1;
   std::vector<float> output(N * C_out * H_out * W_out, 0.0f);
 
-  ReferenceConv2D(input.data(), weight.data(), output.data(),
+  ReferenceConv2D(input.data(), weight.data(), nullptr, output.data(),
                   N, C_in, H_in, W_in, C_out, K_h, K_w,
                   pad_h, pad_w, stride_h, stride_w);
 
@@ -235,4 +246,164 @@ TEST_F(HipDNNConvTest, ReferenceConvCorrectness) {
   for (int i = 0; i < static_cast<int>(output.size()); ++i) {
     EXPECT_NEAR(output[i], 9.0f, 1e-5f) << "Output mismatch at index " << i;
   }
+}
+
+TEST_F(HipDNNConvTest, ReferenceConvWithBiasCorrectness) {
+  // Test the reference implementation with bias
+  const int N = 1, C_in = 1, H_in = 4, W_in = 4;
+  const int C_out = 2, K_h = 3, K_w = 3;
+  const int pad_h = 0, pad_w = 0;
+  const int stride_h = 1, stride_w = 1;
+
+  // Simple input: 4x4 matrix of ones
+  std::vector<float> input(N * C_in * H_in * W_in, 1.0f);
+
+  // Simple weight: 3x3 matrix of ones for each output channel
+  std::vector<float> weight(C_out * C_in * K_h * K_w, 1.0f);
+
+  // Bias: different value for each output channel
+  std::vector<float> bias = {1.0f, 2.0f};
+
+  // Output should be 2x2 (4 - 3 + 1 = 2)
+  int H_out = (H_in - K_h) / stride_h + 1;
+  int W_out = (W_in - K_w) / stride_w + 1;
+  std::vector<float> output(N * C_out * H_out * W_out, 0.0f);
+
+  ReferenceConv2D(input.data(), weight.data(), bias.data(), output.data(),
+                  N, C_in, H_in, W_in, C_out, K_h, K_w,
+                  pad_h, pad_w, stride_h, stride_w);
+
+  // Each output should be sum of 3x3 = 9 ones + bias
+  // Channel 0: 9.0 + 1.0 = 10.0
+  // Channel 1: 9.0 + 2.0 = 11.0
+  for (int c = 0; c < C_out; ++c) {
+    float expected = 9.0f + bias[c];
+    for (int h = 0; h < H_out; ++h) {
+      for (int w = 0; w < W_out; ++w) {
+        int idx = c * H_out * W_out + h * W_out + w;
+        EXPECT_NEAR(output[idx], expected, 1e-5f) 
+            << "Output mismatch at channel " << c << ", h=" << h << ", w=" << w;
+      }
+    }
+  }
+}
+
+TEST_F(HipDNNConvTest, Conv2DWithBias) {
+  ASSERT_TRUE(ep_available_) << "HipDNN EP not available";
+
+  // Check if bias model file exists
+  std::ifstream bias_model_file(CONV_BIAS_TEST_MODEL_PATH);
+  bool bias_model_available = bias_model_file.good();
+  if (!bias_model_available) {
+    GTEST_SKIP() << "Conv bias test model not available at: " << CONV_BIAS_TEST_MODEL_PATH
+                 << ". Generate it with: python gen_conv_model.py --bias -o conv_bias_test.onnx";
+  }
+  std::cout << "CONV_BIAS_TEST_MODEL_PATH: " << CONV_BIAS_TEST_MODEL_PATH << std::endl;
+
+  // Model parameters (must match gen_conv_model.py defaults with --bias)
+  const int64_t N = 1, C = 1, H = 8, W = 8;
+  const std::vector<int64_t> input_shape = {N, C, H, W};
+  const size_t input_size = N * C * H * W;
+
+  // Create input data
+  std::vector<float> input_data(input_size);
+  for (size_t i = 0; i < input_size; ++i) {
+    input_data[i] = static_cast<float>(i % 10) / 10.0f;
+  }
+
+  // Run with CPU EP first to get reference output
+  std::vector<float> cpu_output;
+  {
+    Ort::SessionOptions session_options;
+    Ort::Session session(*env_, ORT_TSTR_ON_MACRO(CONV_BIAS_TEST_MODEL_PATH), session_options);
+
+    auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, input_data.data(), input_size, input_shape.data(), input_shape.size());
+
+    const char* input_names[] = {"X"};
+    const char* output_names[] = {"Y"};
+
+    auto output_tensors = session.Run(Ort::RunOptions{}, input_names, &input_tensor, 1, output_names, 1);
+
+    ASSERT_EQ(output_tensors.size(), 1);
+    auto& output_tensor = output_tensors[0];
+    auto output_info = output_tensor.GetTensorTypeAndShapeInfo();
+    size_t output_size = output_info.GetElementCount();
+
+    const float* output_data = output_tensor.GetTensorData<float>();
+    cpu_output.assign(output_data, output_data + output_size);
+
+    std::cout << "CPU output size (with bias): " << output_size << std::endl;
+  }
+
+  // Run with HipDNN EP
+  std::vector<float> gpu_output;
+  {
+    // Get EP devices
+    std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
+    ASSERT_FALSE(devices.empty()) << "No EP devices found";
+
+    // Find a HipDNN device
+    const OrtEpDevice* hipdnn_device = nullptr;
+    for (const auto& device : devices) {
+      std::string ep_name = device.EpName();
+      if (ep_name == "HipDNN") {
+        hipdnn_device = static_cast<const OrtEpDevice*>(device);
+        break;
+      }
+    }
+
+    ASSERT_NE(hipdnn_device, nullptr) << "No HipDNN device found";
+
+    Ort::SessionOptions session_options;
+
+    // Add HipDNN EP using V2 API
+    OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+        session_options, *env_, &hipdnn_device, 1, nullptr, nullptr, 0);
+
+    if (status != nullptr) {
+      std::string error_msg = Ort::GetApi().GetErrorMessage(status);
+      Ort::GetApi().ReleaseStatus(status);
+      FAIL() << "Failed to add HipDNN EP: " << error_msg;
+    }
+
+    std::cout << "Creating session with HipDNN EP (bias model)..." << std::endl;
+    Ort::Session session(*env_, ORT_TSTR_ON_MACRO(CONV_BIAS_TEST_MODEL_PATH), session_options);
+    std::cout << "Session created successfully" << std::endl;
+
+    auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, input_data.data(), input_size, input_shape.data(), input_shape.size());
+
+    const char* input_names[] = {"X"};
+    const char* output_names[] = {"Y"};
+
+    std::cout << "Running inference (with bias)..." << std::endl;
+    auto output_tensors = session.Run(Ort::RunOptions{}, input_names, &input_tensor, 1, output_names, 1);
+    std::cout << "Inference completed" << std::endl;
+
+    ASSERT_EQ(output_tensors.size(), 1);
+    auto& output_tensor = output_tensors[0];
+    auto output_info = output_tensor.GetTensorTypeAndShapeInfo();
+    size_t output_size = output_info.GetElementCount();
+
+    const float* output_data = output_tensor.GetTensorData<float>();
+    gpu_output.assign(output_data, output_data + output_size);
+
+    std::cout << "GPU output size (with bias): " << output_size << std::endl;
+  }
+
+  // Compare outputs
+  ASSERT_EQ(cpu_output.size(), gpu_output.size()) << "Output size mismatch";
+
+  float max_diff = 0.0f;
+  for (size_t i = 0; i < cpu_output.size(); ++i) {
+    float diff = std::abs(cpu_output[i] - gpu_output[i]);
+    max_diff = std::max(max_diff, diff);
+    EXPECT_NEAR(cpu_output[i], gpu_output[i], 1e-4f)
+        << "Mismatch at index " << i << ": CPU=" << cpu_output[i] << ", GPU=" << gpu_output[i];
+  }
+
+  std::cout << "Max difference between CPU and GPU (with bias): " << max_diff << std::endl;
 }

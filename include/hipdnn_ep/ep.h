@@ -9,16 +9,12 @@
 
 #include "ep_utils.h"
 
-// Forward declarations for hipDNN
-struct hipdnnHandle;
-typedef hipdnnHandle* hipdnnHandle_t;
-
 namespace hipdnn_ep {
 
 class HipDNNEpFactory;
 struct Kernel;
 
-/// @brief hipDNN Execution Provider implementation
+/// @brief MIOpen-based Execution Provider implementation
 class HipDNNEp : public OrtEp, public ApiPtrs {
  public:
   struct Config {
@@ -31,7 +27,6 @@ class HipDNNEp : public OrtEp, public ApiPtrs {
 
   // Accessors
   Kernel* GetKernel(const std::string& name);
-  hipdnnHandle_t GetHipDNNHandle() const { return hipdnn_handle_; }
   HipDNNEpFactory& GetFactory() { return factory_; }
 
  private:
@@ -66,25 +61,16 @@ class HipDNNEp : public OrtEp, public ApiPtrs {
       OrtNodeComputeInfo** node_compute_infos,
       size_t num_node_compute_infos) noexcept;
 
+  static OrtStatus* ORT_API_CALL GetKernelRegistryImpl(
+      OrtEp* this_ptr,
+      const OrtKernelRegistry** kernel_registry) noexcept;
+
   // Member data
   HipDNNEpFactory& factory_;
   Config config_;
   const OrtLogger& logger_;
 
-  // TODO: Currently hipDNN handle and compiled kernels are per-session.
-  // Decide if these should be moved to HipDNNEpFactory for sharing across sessions.
-  // Trade-offs:
-  //   Per-session (current): Simpler lifetime management, no thread sync needed,
-  //     supports session-specific shapes/config. But redundant compilation if
-  //     multiple sessions load the same model.
-  //   Per-factory (shared): Avoids recompilation, less GPU memory. But requires
-  //     cache keying (op_type, shapes, attributes), thread synchronization, and
-  //     handle affinity considerations.
-
-  // hipDNN handle
-  hipdnnHandle_t hipdnn_handle_{nullptr};
-
-  // Compiled kernels
+  // Compiled kernels (each Kernel manages its own MIOpen handle)
   std::unordered_map<std::string, std::unique_ptr<Kernel>> kernels_;
 };
 

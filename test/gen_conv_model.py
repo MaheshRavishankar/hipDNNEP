@@ -26,9 +26,10 @@ def create_conv_model(
     pad_w=1,
     stride_h=1,
     stride_w=1,
+    use_bias=False,
     output_file="conv_test.onnx"
 ):
-    """Create a simple Conv model."""
+    """Create a simple Conv model with optional bias."""
 
     # Input
     X = helper.make_tensor_value_info('X', TensorProto.FLOAT,
@@ -39,6 +40,17 @@ def create_conv_model(
     W_data = np.random.randn(*W_shape).astype(np.float32)
     W = helper.make_tensor('W', TensorProto.FLOAT, W_shape, W_data.flatten().tolist())
 
+    # Bias (optional)
+    B_data = None
+    initializers = [W]
+    conv_inputs = ['X', 'W']
+    if use_bias:
+        B_shape = [out_channels]
+        B_data = np.random.randn(*B_shape).astype(np.float32)
+        B = helper.make_tensor('B', TensorProto.FLOAT, B_shape, B_data.flatten().tolist())
+        initializers.append(B)
+        conv_inputs.append('B')
+
     # Output shape
     out_h = (height + 2 * pad_h - kernel_h) // stride_h + 1
     out_w = (width + 2 * pad_w - kernel_w) // stride_w + 1
@@ -48,7 +60,7 @@ def create_conv_model(
     # Conv node
     conv_node = helper.make_node(
         'Conv',
-        inputs=['X', 'W'],
+        inputs=conv_inputs,
         outputs=['Y'],
         kernel_shape=[kernel_h, kernel_w],
         pads=[pad_h, pad_w, pad_h, pad_w],
@@ -61,7 +73,7 @@ def create_conv_model(
         'conv_test',
         [X],  # inputs
         [Y],  # outputs
-        [W],  # initializers
+        initializers,  # initializers
     )
 
     # Model
@@ -74,13 +86,20 @@ def create_conv_model(
     print(f"Saved model to {output_file}")
     print(f"  Input shape: [{batch}, {in_channels}, {height}, {width}]")
     print(f"  Weight shape: {W_shape}")
+    if use_bias:
+        print(f"  Bias shape: [{out_channels}]")
     print(f"  Output shape: [{batch}, {out_channels}, {out_h}, {out_w}]")
 
     # Also save weights for reference comparison
     np.save(output_file.replace('.onnx', '_weights.npy'), W_data)
     print(f"Saved weights to {output_file.replace('.onnx', '_weights.npy')}")
 
-    return model, W_data
+    # Save bias if present
+    if use_bias and B_data is not None:
+        np.save(output_file.replace('.onnx', '_bias.npy'), B_data)
+        print(f"Saved bias to {output_file.replace('.onnx', '_bias.npy')}")
+
+    return model, W_data, B_data
 
 
 if __name__ == "__main__":
@@ -95,6 +114,7 @@ if __name__ == "__main__":
     parser.add_argument("--kernel", type=int, default=3)
     parser.add_argument("--pad", type=int, default=1)
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--bias", action="store_true", help="Include bias in convolution")
     args = parser.parse_args()
 
     create_conv_model(
@@ -109,5 +129,6 @@ if __name__ == "__main__":
         pad_w=args.pad,
         stride_h=args.stride,
         stride_w=args.stride,
+        use_bias=args.bias,
         output_file=args.output
     )

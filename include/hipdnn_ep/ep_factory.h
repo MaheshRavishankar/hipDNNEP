@@ -9,6 +9,7 @@
 #include "ep_utils.h"
 #include "ep_allocator.h"
 #include "ep_data_transfer.h"
+#include "memcpy_kernel.h"
 
 namespace hipdnn_ep {
 
@@ -18,11 +19,12 @@ class HipDNNEp;  // Forward declaration
 class HipDNNEpFactory : public OrtEpFactory, public ApiPtrs {
  public:
   HipDNNEpFactory(const char* ep_name, ApiPtrs apis, const OrtLogger& default_logger);
-  ~HipDNNEpFactory() = default;
+  ~HipDNNEpFactory();
 
   // Accessors
   HipDataTransfer* GetDataTransfer() const { return data_transfer_impl_.get(); }
   int GetDeviceId() const { return device_id_; }
+  OrtKernelRegistry* GetKernelRegistry() const { return kernel_registry_; }
 
  private:
   // OrtEpFactory interface implementations
@@ -89,6 +91,9 @@ class HipDNNEpFactory : public OrtEpFactory, public ApiPtrs {
 
   // Data transfer
   std::unique_ptr<HipDataTransfer> data_transfer_impl_;
+
+  // Kernel registry for MemcpyToHost/MemcpyFromHost kernels
+  OrtKernelRegistry* kernel_registry_{nullptr};
 };
 
 }  // namespace hipdnn_ep

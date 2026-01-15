@@ -5,6 +5,8 @@
 #include <hip/hip_runtime.h>
 #include <cstring>
 
+#include <iostream>
+
 namespace hipdnn_ep {
 
 HipDataTransfer::HipDataTransfer(ApiPtrs api_ptrs, const OrtMemoryDevice* device_mem_info, int device_id)
@@ -18,11 +20,15 @@ HipDataTransfer::HipDataTransfer(ApiPtrs api_ptrs, const OrtMemoryDevice* device
 bool ORT_API_CALL HipDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_ptr,
                                                const OrtMemoryDevice* src_memory_device,
                                                const OrtMemoryDevice* dst_memory_device) noexcept {
+  static size_t cnt = 0;
+  std::cerr << "CanCopyImpl: " << cnt++ << std::endl;
+
   const auto& impl = *static_cast<const HipDataTransfer*>(this_ptr);
 
   // Get memory types
   OrtDeviceMemoryType src_type = impl.ep_api.MemoryDevice_GetMemoryType(src_memory_device);
   OrtDeviceMemoryType dst_type = impl.ep_api.MemoryDevice_GetMemoryType(dst_memory_device);
+  std::cerr << "memory type: " << src_type << " -> " << dst_type << std::endl;
 
   // We support:
   // - CPU to GPU (DEFAULT)
@@ -31,6 +37,7 @@ bool ORT_API_CALL HipDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this_p
 
   OrtMemoryInfoDeviceType src_device_type = impl.ep_api.MemoryDevice_GetDeviceType(src_memory_device);
   OrtMemoryInfoDeviceType dst_device_type = impl.ep_api.MemoryDevice_GetDeviceType(dst_memory_device);
+  std::cerr << "device type: " << src_device_type << " -> " << dst_device_type << std::endl;
 
   bool src_is_cpu = (src_device_type == OrtMemoryInfoDeviceType_CPU);
   bool dst_is_cpu = (dst_device_type == OrtMemoryInfoDeviceType_CPU);
@@ -70,6 +77,8 @@ OrtStatus* ORT_API_CALL HipDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* th
 
   for (size_t i = 0; i < num_tensors; ++i) {
     try {
+      static size_t cnt = 0;
+      std::cerr << "CopyTensorsImpl: " << cnt++ << std::endl;
       Ort::ConstValue src{src_tensors_ptr[i]};
       Ort::UnownedValue dst{dst_tensors_ptr[i]};
 
@@ -134,6 +143,7 @@ OrtStatus* ORT_API_CALL HipDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* th
       } else {
         // CPU to CPU - use memcpy
         std::memcpy(dst_data, src_data, byte_size);
+        std::cerr << "std::memcpy: " << dst_data << ", " << src_data << ", " << byte_size << std::endl;
         continue;
       }
 
@@ -143,6 +153,7 @@ OrtStatus* ORT_API_CALL HipDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* th
         RETURN_ERROR(impl.ort_api, ORT_EP_FAIL, "hipMemcpy failed: " << hipGetErrorString(err));
       }
 
+      std::cerr << "hipMemcpy: " << dst_data << ", " << src_data << ", " << byte_size << ", " << kind << std::endl;
     } catch (const Ort::Exception& ex) {
       Ort::Status status(ex);
       return status.release();

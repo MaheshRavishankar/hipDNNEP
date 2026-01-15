@@ -9,9 +9,8 @@
     {
       "name": "base",
       "hidden": true,
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/../build/hipDNNEP/${presetName}",
-      "installDir": "${sourceDir}/../install/hipDNNEP/${presetName}",
+      "binaryDir": "${sourceDir}/build/hipDNNEP/${presetName}",
+      "installDir": "${sourceDir}/install/hipDNNEP/${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "THEROCK_DIST": "/home/mahesh/TheRock/build/MaheshRelWithDebInfo/dist/rocm",
@@ -50,15 +49,18 @@
   "buildPresets": [
     {
       "name": "RelWithDebInfo",
-      "configurePreset": "RelWithDebInfo"
+      "configurePreset": "RelWithDebInfo",
+      "configuration": "RelWithDebInfo"
     },
     {
       "name": "Debug",
-      "configurePreset": "Debug"
+      "configurePreset": "Debug",
+      "configuration": "Debug"
     },
     {
       "name": "Release",
-      "configurePreset": "Release"
+      "configurePreset": "Release",
+      "configuration": "Release"
     }
   ],
   "testPresets": [

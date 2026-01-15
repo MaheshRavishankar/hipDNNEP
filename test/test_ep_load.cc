@@ -10,7 +10,8 @@
 #include "onnxruntime_cxx_api.h"
 
 #ifndef HIPDNN_EP_LIB_PATH
-#define HIPDNN_EP_LIB_PATH "./libhipdnn_ep.so"
+// #define HIPDNN_EP_LIB_PATH "./libhipdnn_ep.so"
+#define HIPDNN_EP_LIB_PATH "./hipdnn_ep.dll"
 #endif
 
 class HipDNNEpLoadTest : public ::testing::Test {
@@ -29,7 +30,7 @@ class HipDNNEpLoadTest : public ::testing::Test {
 };
 
 TEST_F(HipDNNEpLoadTest, RegisterEpLibrary) {
-  const char* lib_path = HIPDNN_EP_LIB_PATH;
+  const ORTCHAR_T* lib_path = ORT_TSTR_ON_MACRO(HIPDNN_EP_LIB_PATH);
 
   OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
       *env_, "HipDNN", lib_path);
@@ -44,7 +45,7 @@ TEST_F(HipDNNEpLoadTest, RegisterEpLibrary) {
 }
 
 TEST_F(HipDNNEpLoadTest, GetEpDevices) {
-  const char* lib_path = HIPDNN_EP_LIB_PATH;
+  const ORTCHAR_T* lib_path = ORT_TSTR_ON_MACRO(HIPDNN_EP_LIB_PATH);
 
   // First register the EP
   OrtStatus* status = Ort::GetApi().RegisterExecutionProviderLibrary(
