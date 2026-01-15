@@ -66,3 +66,34 @@ target_compile_definitions(hipdnn_ep_tests PRIVATE
 # Add test
 include(GoogleTest)
 gtest_discover_tests(hipdnn_ep_tests)
+
+# Standalone MIOpen test - demonstrates direct MIOpen API usage for conv and conv+bias
+add_executable(miopen_conv_tests
+  test_miopen_conv.cc
+)
+
+target_link_libraries(miopen_conv_tests PRIVATE
+  GTest::gtest
+  GTest::gtest_main
+  MIOpen
+  hip::host
+)
+
+# gtest_discover_tests(miopen_conv_tests)
+
+# Standalone hipDNN test - demonstrates direct hipDNN frontend API usage for conv and conv+bias
+add_executable(hipdnn_conv_tests
+  test_hipdnn_conv.cc
+)
+
+target_link_libraries(hipdnn_conv_tests PRIVATE
+  GTest::gtest
+  GTest::gtest_main
+  hipdnn_frontend
+  hip::host
+)
+
+target_compile_options(hipdnn_conv_tests PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+target_compile_options(hipdnn_conv_tests PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/Zc:__cplusplus>")
+
+# gtest_discover_tests(hipdnn_conv_tests)

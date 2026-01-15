@@ -31,7 +31,7 @@ find_package(hip REQUIRED CONFIG)
 find_package(miopen REQUIRED CONFIG)
 
 # Find hipDNN from TheRock (optional, for future use)
-# find_package(hipdnn_frontend CONFIG)
+find_package(hipdnn_frontend CONFIG)
 # find_package(hipdnn_backend CONFIG REQUIRED)
 
 # iree-compile is required at runtime by hipDNN backend
