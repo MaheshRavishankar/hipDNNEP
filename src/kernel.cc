@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "hipdnn_ep/kernel.h"
+#include "hipdnn_ep/blas_graph.h"
 
 namespace hipdnn_ep {
 
@@ -159,8 +160,9 @@ OrtStatus* AddNode(
 // Kernel implementation
 //
 
-Kernel::Kernel(const OrtApi& ort_api, const OrtLogger& logger, hipdnnHandle_t handle)
-    : ort_api_(ort_api), logger_(logger), handle_(handle) {
+Kernel::Kernel(const OrtApi& ort_api, const OrtLogger& logger, hipdnnHandle_t handle,
+               hipblaslt_handle_t hipblaslt_handle)
+    : ort_api_(ort_api), logger_(logger), handle_(handle), hipblaslt_handle_(hipblaslt_handle) {
 }
 
 Kernel::~Kernel() = default;
@@ -169,11 +171,35 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
   try {
     using namespace hipdnn_frontend::graph;
 
-    graph_ = std::make_unique<Graph>();
-
     // Extract graph input/output info
     std::vector<Ort::ConstValueInfo> graph_inputs = graph.GetInputs();
     std::vector<Ort::ConstValueInfo> graph_outputs = graph.GetOutputs();
+
+    // Store output shapes for Execute
+    output_shapes_.reserve(graph_outputs.size());
+    for (const auto& output : graph_outputs) {
+      auto shape = GetTensorShape(output);
+      if (!shape.has_value()) {
+        RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Graph output must have static shape: " << output.GetName());
+      }
+      output_shapes_.push_back(shape.value());
+    }
+
+    // Check if this is a single MatMul/Gemm node graph that can use hipBLAS-LT
+    std::vector<Ort::ConstNode> nodes = graph.GetNodes();
+
+    if (nodes.size() == 1 && hipblaslt_handle_ != nullptr) {
+      std::string op_type = nodes[0].GetOperatorType();
+      if (op_type == "MatMul" || op_type == "Gemm") {
+        // Handle MatMul/Gemm with hipBLAS-LT via BlasGraph
+        blas_graph_ = std::make_unique<BlasGraph>(ort_api_, hipblaslt_handle_);
+        RETURN_IF_ERROR(blas_graph_->Build(nodes[0], output_shapes_[0]));
+        return nullptr;
+      }
+    }
+
+    // Standard hipDNN graph path
+    graph_ = std::make_unique<Graph>();
 
     // Create TensorAttributes for all graph inputs and add to symbol table
     input_uids_.reserve(graph_inputs.size());
@@ -186,7 +212,6 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
     }
 
     // Process each node in the graph
-    std::vector<Ort::ConstNode> nodes = graph.GetNodes();
     for (const auto& node : nodes) {
       // Look up input TensorAttributes from symbol table
       std::vector<Ort::ConstValueInfo> node_inputs = node.GetInputs();
@@ -235,7 +260,6 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
 
     // Mark graph outputs as non-virtual and store their UIDs
     output_uids_.reserve(graph_outputs.size());
-    output_shapes_.reserve(graph_outputs.size());
     for (const auto& output : graph_outputs) {
       std::string name = output.GetName();
       auto it = symbol_table_.find(name);
@@ -244,12 +268,6 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
       }
       it->second->set_is_virtual(false);
       output_uids_.push_back(it->second->get_uid());
-
-      auto shape = GetTensorShape(output);
-      if (!shape.has_value()) {
-        RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Graph output must have static shape: " << name);
-      }
-      output_shapes_.push_back(shape.value());
     }
 
     // Compile the graph
@@ -305,6 +323,12 @@ OrtStatus* Kernel::CompileGraph() {
 }
 
 OrtStatus* Kernel::Execute(OrtKernelContext* kernel_ctx) {
+  // If we have a BlasGraph (hipBLAS-LT path), use it for execution
+  if (blas_graph_) {
+    return blas_graph_->Execute(kernel_ctx);
+  }
+
+  // Otherwise, use the hipDNN graph
   try {
     Ort::KernelContext context(kernel_ctx);
 

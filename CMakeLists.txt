@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 cmake_minimum_required(VERSION 3.20)
-project(hipdnn_ep LANGUAGES CXX)
+project(hipdnn_ep LANGUAGES CXX HIP)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,12 +30,13 @@ find_package(hip REQUIRED CONFIG)
 find_package(hipdnn_frontend CONFIG REQUIRED)
 find_package(hipdnn_backend CONFIG REQUIRED)
 
-# iree-compile is required at runtime by hipDNN backend
-find_program(IREE_COMPILE iree-compile)
-if(NOT IREE_COMPILE)
-  message(FATAL_ERROR "iree-compile not found in PATH. It is required by hipDNN backend for code generation.")
+# Find hipBLAS-LT from TheRock (optional)
+find_package(hipblaslt CONFIG)
+if(hipblaslt_FOUND)
+  message(STATUS "Found hipBLAS-LT: MatMul/Gemm support enabled")
+else()
+  message(STATUS "hipBLAS-LT not found: MatMul/Gemm support disabled")
 endif()
-message(STATUS "Found iree-compile: ${IREE_COMPILE}")
 
 # ONNXRuntime headers
 set(ONNXRUNTIME_ROOT "$ENV{ONNXRUNTIME_ROOT}" CACHE PATH "Path to ONNXRuntime source")
@@ -50,8 +51,8 @@ if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_c_api.h")
   message(FATAL_ERROR "ONNXRuntime headers not found at ${ONNXRUNTIME_INCLUDE_DIR}")
 endif()
 
-# Main library
-add_library(hipdnn_ep SHARED
+# Main library sources
+set(HIPDNN_EP_SOURCES
   src/ep_utils.cc
   src/ep_factory.cc
   src/ep.cc
@@ -61,6 +62,14 @@ add_library(hipdnn_ep SHARED
   src/kernel.cc
   src/node_compute_info.cc
 )
+
+# Add hipBLAS-LT sources if available (compiled with HIP/hipcc)
+if(hipblaslt_FOUND)
+  list(APPEND HIPDNN_EP_SOURCES src/blas_graph.cc)
+  set_source_files_properties(src/blas_graph.cc PROPERTIES LANGUAGE HIP)
+endif()
+
+add_library(hipdnn_ep SHARED ${HIPDNN_EP_SOURCES})
 
 target_include_directories(hipdnn_ep
   PUBLIC
@@ -76,6 +85,12 @@ target_link_libraries(hipdnn_ep
     hipdnn_backend
     hip::host
 )
+
+# Link hipBLAS-LT if available
+if(hipblaslt_FOUND)
+  target_link_libraries(hipdnn_ep PRIVATE roc::hipblaslt)
+  target_compile_definitions(hipdnn_ep PRIVATE HIPDNN_EP_HAS_HIPBLASLT)
+endif()
 
 # Symbol visibility
 target_compile_definitions(hipdnn_ep PRIVATE HIPDNN_EP_EXPORTS)

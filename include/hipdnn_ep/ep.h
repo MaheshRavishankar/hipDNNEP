@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "blas_graph.h"
 #include "ep_utils.h"
 
 // Forward declarations for hipDNN
@@ -32,6 +33,7 @@ class HipDNNEp : public OrtEp, public ApiPtrs {
   // Accessors
   Kernel* GetKernel(const std::string& name);
   hipdnnHandle_t GetHipDNNHandle() const { return hipdnn_handle_; }
+  hipblaslt_handle_t GetHipBlasLtHandle() const { return hipblaslt_handle_; }
   HipDNNEpFactory& GetFactory() { return factory_; }
 
  private:
@@ -83,6 +85,9 @@ class HipDNNEp : public OrtEp, public ApiPtrs {
 
   // hipDNN handle
   hipdnnHandle_t hipdnn_handle_{nullptr};
+
+  // hipBLAS-LT handle (optional, for MatMul/Gemm)
+  hipblaslt_handle_t hipblaslt_handle_{nullptr};
 
   // Compiled kernels
   std::unordered_map<std::string, std::unique_ptr<Kernel>> kernels_;

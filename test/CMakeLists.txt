@@ -30,6 +30,7 @@ endif()
 add_executable(hipdnn_ep_tests
   test_ep_load.cc
   test_conv.cc
+  test_matmul.cc
 )
 
 target_include_directories(hipdnn_ep_tests PRIVATE
@@ -44,15 +45,38 @@ target_link_libraries(hipdnn_ep_tests PRIVATE
   dl
 )
 
-# Copy test model to build directory
+# Copy test models to build directory
 set(CONV_TEST_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/conv_test.onnx")
 if(EXISTS "${CONV_TEST_MODEL}")
   configure_file("${CONV_TEST_MODEL}" "${CMAKE_CURRENT_BINARY_DIR}/conv_test.onnx" COPYONLY)
 endif()
 
+# MatMul/Gemm test models
+set(MATMUL_TEST_MODELS
+  matmul_test.onnx
+  gemm_test.onnx
+  gemm_bias_test.onnx
+  gemm_trans_a_test.onnx
+  gemm_trans_b_test.onnx
+  gemm_scaled_test.onnx
+)
+
+foreach(MODEL ${MATMUL_TEST_MODELS})
+  set(MODEL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/${MODEL}")
+  if(EXISTS "${MODEL_PATH}")
+    configure_file("${MODEL_PATH}" "${CMAKE_CURRENT_BINARY_DIR}/${MODEL}" COPYONLY)
+  endif()
+endforeach()
+
 target_compile_definitions(hipdnn_ep_tests PRIVATE
   HIPDNN_EP_LIB_PATH="$<TARGET_FILE:hipdnn_ep>"
   CONV_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/conv_test.onnx"
+  MATMUL_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/matmul_test.onnx"
+  GEMM_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_test.onnx"
+  GEMM_BIAS_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_bias_test.onnx"
+  GEMM_TRANS_A_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_trans_a_test.onnx"
+  GEMM_TRANS_B_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_trans_b_test.onnx"
+  GEMM_SCALED_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_scaled_test.onnx"
   ORT_API_MANUAL_INIT
 )
 

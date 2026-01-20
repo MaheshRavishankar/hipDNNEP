@@ -145,6 +145,9 @@ std::string GetStringAttrOrDefault(Ort::ConstNode node, const char* name, const 
 // Helper to get an int64 attribute with a default value
 int64_t GetIntAttrOrDefault(Ort::ConstNode node, const char* name, int64_t default_val);
 
+// Helper to get a float attribute with a default value
+float GetFloatAttrOrDefault(Ort::ConstNode node, const char* name, float default_val);
+
 // Helper to get an int64 array attribute with a default value
 std::vector<int64_t> GetIntsAttrOrDefault(Ort::ConstNode node, const char* name,
                                           const std::vector<int64_t>& default_val);

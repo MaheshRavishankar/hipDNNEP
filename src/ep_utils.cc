@@ -31,6 +31,19 @@ int64_t GetIntAttrOrDefault(Ort::ConstNode node, const char* name, int64_t defau
   return value;
 }
 
+float GetFloatAttrOrDefault(Ort::ConstNode node, const char* name, float default_val) {
+  Ort::ConstOpAttr attr{nullptr};
+  auto status = node.GetAttributeByName(name, attr);
+  if (!status.IsOK() || !static_cast<const OrtOpAttr*>(attr)) {
+    return default_val;
+  }
+  float value;
+  if (!attr.GetValue(value).IsOK()) {
+    return default_val;
+  }
+  return value;
+}
+
 std::vector<int64_t> GetIntsAttrOrDefault(Ort::ConstNode node, const char* name,
                                           const std::vector<int64_t>& default_val) {
   Ort::ConstOpAttr attr{nullptr};

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "blas_graph.h"
 #include "ep_utils.h"
 #include <memory>
 #include <string>
@@ -15,12 +16,14 @@
 
 namespace hipdnn_ep {
 
-/// @brief Generic kernel that builds and executes hipDNN graphs
+/// @brief Generic kernel that builds and executes hipDNN graphs or hipBLAS-LT matmuls
 struct Kernel {
-  Kernel(const OrtApi& ort_api, const OrtLogger& logger, hipdnnHandle_t handle);
+  /// @param hipblaslt_handle Optional hipBLAS-LT handle for MatMul/Gemm support (nullptr if unavailable)
+  Kernel(const OrtApi& ort_api, const OrtLogger& logger, hipdnnHandle_t handle,
+         hipblaslt_handle_t hipblaslt_handle = nullptr);
   ~Kernel();
 
-  /// @brief Build and compile hipDNN graph from an ORT graph
+  /// @brief Build and compile graph from an ORT graph
   OrtStatus* BuildAndCompile(Ort::ConstGraph graph);
 
   /// @brief Execute the compiled graph
@@ -34,13 +37,13 @@ struct Kernel {
   const OrtLogger& logger_;
   hipdnnHandle_t handle_;
 
-  // hipDNN graph
+  // hipDNN graph (nullptr when using blas_graph_)
   std::unique_ptr<hipdnn_frontend::graph::Graph> graph_;
 
-  // Workspace
+  // Workspace for hipDNN graph
   std::vector<char> workspace_;
 
-  // Graph input/output info (stored at compile time)
+  // Graph input/output info (stored at compile time, used by hipDNN path)
   std::vector<int64_t> input_uids_;   // UID for each graph input
   std::vector<int64_t> output_uids_;  // UID for each graph output
   std::vector<std::vector<int64_t>> output_shapes_;
@@ -51,6 +54,10 @@ struct Kernel {
 
   // UID counter for tensor attributes
   int64_t next_uid_{1};
+
+  // hipBLAS-LT support (nullptr if unavailable)
+  hipblaslt_handle_t hipblaslt_handle_{nullptr};
+  std::unique_ptr<BlasGraph> blas_graph_;
 };
 
 }  // namespace hipdnn_ep
