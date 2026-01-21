@@ -30,10 +30,14 @@ class BlasGraph {
   BlasGraph(const BlasGraph&) = delete;
   BlasGraph& operator=(const BlasGraph&) = delete;
 
-  /// @brief Build the graph from an ONNX MatMul or Gemm node
-  /// @param node The ONNX node (must be MatMul or Gemm)
-  /// @param output_shape The expected output shape [M, N]
-  OrtStatus* Build(Ort::ConstNode node, const std::vector<int64_t>& output_shape);
+  /// @brief Build the graph from ONNX graph inputs, outputs, and nodes
+  /// @param graph_inputs The graph input value infos
+  /// @param graph_outputs The graph output value infos
+  /// @param nodes The nodes to process (must be single MatMul or Gemm)
+  /// @return nullptr on success, error status if not supported or on failure
+  OrtStatus* Build(const std::vector<Ort::ConstValueInfo>& graph_inputs,
+                   const std::vector<Ort::ConstValueInfo>& graph_outputs,
+                   const std::vector<Ort::ConstNode>& nodes);
 
   /// @brief Execute the graph
   /// @param kernel_ctx The ORT kernel context with input/output tensors

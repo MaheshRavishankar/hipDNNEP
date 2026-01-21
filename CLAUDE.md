@@ -8,7 +8,7 @@ This is an out-of-tree ONNXRuntime Execution Provider (EP) that uses AMD's hipDN
 
 ```bash
 # Ensure iree-compile is in PATH
-export PATH="/path/to/iree/build/tools:$PATH"
+export PATH="$HOME/iree/build/RelWithDebInfo/tools:$PATH"
 
 # Configure
 cmake --preset RelWithDebInfo
@@ -26,7 +26,7 @@ Before building, ensure these environment variables are set:
 ```bash
 export THEROCK_DIST="/path/to/TheRock/build/dist/rocm"
 export ONNXRUNTIME_ROOT="/path/to/onnxruntime"
-export PATH="/path/to/iree/build/tools:$PATH"
+export PATH="$HOME/iree/build/RelWithDebInfo/tools:$PATH"
 ```
 
 ## Git Workflow

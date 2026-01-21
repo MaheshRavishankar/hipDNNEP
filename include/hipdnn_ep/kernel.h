@@ -5,14 +5,10 @@
 
 #include "blas_graph.h"
 #include "ep_utils.h"
-#include <memory>
-#include <string>
-#include <unordered_map>
-#include <vector>
+#include "hipdnn_graph.h"
 
-// hipDNN includes
-#include <hipdnn_backend.h>
-#include <hipdnn_frontend.hpp>
+#include <memory>
+#include <vector>
 
 namespace hipdnn_ep {
 
@@ -30,32 +26,14 @@ struct Kernel {
   OrtStatus* Execute(OrtKernelContext* kernel_ctx);
 
  private:
-  /// @brief Compile the hipDNN graph after all ops are added
-  OrtStatus* CompileGraph();
-
   const OrtApi& ort_api_;
   const OrtLogger& logger_;
-  hipdnnHandle_t handle_;
 
   // hipDNN graph (nullptr when using blas_graph_)
-  std::unique_ptr<hipdnn_frontend::graph::Graph> graph_;
+  hipdnnHandle_t handle_;
+  std::unique_ptr<HipDNNGraph> hipdnn_graph_;
 
-  // Workspace for hipDNN graph
-  std::vector<char> workspace_;
-
-  // Graph input/output info (stored at compile time, used by hipDNN path)
-  std::vector<int64_t> input_uids_;   // UID for each graph input
-  std::vector<int64_t> output_uids_;  // UID for each graph output
-  std::vector<std::vector<int64_t>> output_shapes_;
-
-  // Symbol table: maps value name to TensorAttributes
-  using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
-  std::unordered_map<std::string, TensorAttrPtr> symbol_table_;
-
-  // UID counter for tensor attributes
-  int64_t next_uid_{1};
-
-  // hipBLAS-LT support (nullptr if unavailable)
+  // hipBLAS-LT support (nullptr if unavailable or not used)
   hipblaslt_handle_t hipblaslt_handle_{nullptr};
   std::unique_ptr<BlasGraph> blas_graph_;
 };
