@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 cmake_minimum_required(VERSION 3.20)
-project(hipdnn_ep LANGUAGES CXX HIP)
+project(hipdnn_ep LANGUAGES C CXX HIP)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,6 +10,15 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Options
 option(HIPDNN_EP_BUILD_TESTS "Build tests" ON)
+option(HIPDNN_EP_ENABLE_TORCH_MLIR "Enable Torch-MLIR based IR pipeline" OFF)
+
+# Torch-MLIR configuration
+if(HIPDNN_EP_ENABLE_TORCH_MLIR)
+  set(TORCH_MLIR_INSTALL_DIR "" CACHE PATH "Path to torch-mlir installation (contains lib/cmake/torch-mlir)")
+  if(NOT TORCH_MLIR_INSTALL_DIR)
+    message(FATAL_ERROR "TORCH_MLIR_INSTALL_DIR must be specified when HIPDNN_EP_ENABLE_TORCH_MLIR is ON")
+  endif()
+endif()
 
 # TheRock installation root - contains HIP, hipDNN, and other ROCm components
 set(THEROCK_DIST "$ENV{THEROCK_DIST}" CACHE PATH "Path to TheRock dist/rocm directory")
@@ -36,6 +45,35 @@ if(hipblaslt_FOUND)
   message(STATUS "Found hipBLAS-LT: MatMul/Gemm support enabled")
 else()
   message(STATUS "hipBLAS-LT not found: MatMul/Gemm support disabled")
+endif()
+
+# Find Torch-MLIR and MLIR (optional)
+if(HIPDNN_EP_ENABLE_TORCH_MLIR)
+  # Add torch-mlir install directory to CMAKE_PREFIX_PATH
+  list(APPEND CMAKE_PREFIX_PATH "${TORCH_MLIR_INSTALL_DIR}/lib/cmake/mlir")
+  list(APPEND CMAKE_PREFIX_PATH "${TORCH_MLIR_INSTALL_DIR}/lib/cmake/llvm")
+
+  find_package(MLIR REQUIRED CONFIG)
+
+  message(STATUS "Found MLIR: ${MLIR_DIR}")
+  message(STATUS "Found LLVM: ${LLVM_DIR}")
+
+  # MLIR/LLVM CMake modules
+  list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+
+  include(TableGen)
+  include(AddLLVM)
+  include(AddMLIR)
+  include(HandleLLVMOptions)
+
+  # MLIR include directories
+  include_directories(${LLVM_INCLUDE_DIRS})
+  include_directories(${MLIR_INCLUDE_DIRS})
+
+  # Torch-MLIR libraries (no CMake config file, so we find them directly)
+  set(TORCH_MLIR_LIB_DIR "${TORCH_MLIR_INSTALL_DIR}/lib")
+  set(TORCH_MLIR_INCLUDE_DIR "${TORCH_MLIR_INSTALL_DIR}/include")
 endif()
 
 # ONNXRuntime headers
@@ -91,6 +129,24 @@ target_link_libraries(hipdnn_ep
 if(hipblaslt_FOUND)
   target_link_libraries(hipdnn_ep PRIVATE roc::hipblaslt)
   target_compile_definitions(hipdnn_ep PRIVATE HIPDNN_EP_HAS_HIPBLASLT)
+endif()
+
+# Torch-MLIR configuration
+if(HIPDNN_EP_ENABLE_TORCH_MLIR)
+  target_compile_definitions(hipdnn_ep PRIVATE HIPDNN_EP_HAS_TORCH_MLIR)
+
+  # TODO: Add Torch-MLIR include directories and libraries when needed:
+  #   target_include_directories(hipdnn_ep PRIVATE
+  #     ${LLVM_INCLUDE_DIRS}
+  #     ${MLIR_INCLUDE_DIRS}
+  #     ${TORCH_MLIR_INCLUDE_DIR}
+  #   )
+  #   target_link_libraries(hipdnn_ep PRIVATE
+  #     ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchDialect.a
+  #     ...
+  #     MLIRFuncDialect
+  #     ...
+  #   )
 endif()
 
 # Symbol visibility

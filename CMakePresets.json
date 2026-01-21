@@ -20,6 +20,15 @@
       }
     },
     {
+      "name": "base-mlir",
+      "hidden": true,
+      "inherits": "base",
+      "cacheVariables": {
+        "HIPDNN_EP_ENABLE_TORCH_MLIR": "ON",
+        "TORCH_MLIR_INSTALL_DIR": "${sourceDir}/../build/torch-mlir/install"
+      }
+    },
+    {
       "name": "RelWithDebInfo",
       "displayName": "RelWithDebInfo",
       "description": "Release with debug info",
@@ -45,6 +54,24 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "RelWithDebInfo-MLIR",
+      "displayName": "RelWithDebInfo with Torch-MLIR",
+      "description": "Release with debug info and Torch-MLIR support",
+      "inherits": "base-mlir",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "Debug-MLIR",
+      "displayName": "Debug with Torch-MLIR",
+      "description": "Debug build with Torch-MLIR support",
+      "inherits": "base-mlir",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
     }
   ],
   "buildPresets": [
@@ -59,6 +86,14 @@
     {
       "name": "Release",
       "configurePreset": "Release"
+    },
+    {
+      "name": "RelWithDebInfo-MLIR",
+      "configurePreset": "RelWithDebInfo-MLIR"
+    },
+    {
+      "name": "Debug-MLIR",
+      "configurePreset": "Debug-MLIR"
     }
   ],
   "testPresets": [
@@ -72,6 +107,20 @@
     {
       "name": "Debug",
       "configurePreset": "Debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "RelWithDebInfo-MLIR",
+      "configurePreset": "RelWithDebInfo-MLIR",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "Debug-MLIR",
+      "configurePreset": "Debug-MLIR",
       "output": {
         "outputOnFailure": true
       }
