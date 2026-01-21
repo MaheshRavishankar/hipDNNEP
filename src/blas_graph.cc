@@ -220,10 +220,28 @@ BlasGraph::BlasGraph(const OrtApi& ort_api, hipblaslt_handle_t handle)
 
 BlasGraph::~BlasGraph() = default;
 
-OrtStatus* BlasGraph::Build(Ort::ConstNode node, const std::vector<int64_t>& output_shape) {
-  impl_->output_shape_ = output_shape;
+OrtStatus* BlasGraph::Build(
+    [[maybe_unused]] const std::vector<Ort::ConstValueInfo>& graph_inputs,
+    const std::vector<Ort::ConstValueInfo>& graph_outputs,
+    const std::vector<Ort::ConstNode>& nodes) {
+  // Only handle single MatMul/Gemm node graphs
+  if (nodes.size() != 1) {
+    RETURN_ERROR(impl_->ort_api_, ORT_EP_FAIL, "BlasGraph only supports single-node graphs");
+  }
 
+  Ort::ConstNode node = nodes[0];
   std::string op_type = node.GetOperatorType();
+  if (op_type != "MatMul" && op_type != "Gemm") {
+    RETURN_ERROR(impl_->ort_api_, ORT_EP_FAIL, "BlasGraph only supports MatMul and Gemm ops");
+  }
+
+  // Extract output shape
+  auto output_shape = GetTensorShape(graph_outputs[0]);
+  if (!output_shape.has_value()) {
+    RETURN_ERROR(impl_->ort_api_, ORT_EP_FAIL, "Graph output must have static shape");
+  }
+  impl_->output_shape_ = output_shape.value();
+
   std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
 
   // Get data type
@@ -316,8 +334,6 @@ OrtStatus* BlasGraph::Execute(OrtKernelContext* kernel_ctx) {
   } catch (const Ort::Exception& ex) {
     Ort::Status status(ex);
     return status.release();
-  } catch (const std::exception& ex) {
-    RETURN_ERROR(impl_->ort_api_, ORT_EP_FAIL, "Exception in BlasGraph::Execute: " << ex.what());
   }
 }
 

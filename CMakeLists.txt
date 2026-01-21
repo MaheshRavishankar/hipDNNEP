@@ -59,6 +59,7 @@ set(HIPDNN_EP_SOURCES
   src/ep_allocator.cc
   src/ep_data_transfer.cc
   src/hipdnn_ep_exports.cc
+  src/hipdnn_graph.cc
   src/kernel.cc
   src/node_compute_info.cc
 )
