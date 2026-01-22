@@ -68,6 +68,12 @@ Before building, ensure these environment variables are set:
 ```bash
 export THEROCK_DIST="/path/to/TheRock/build/dist/rocm"
 export ONNXRUNTIME_ROOT="/path/to/onnxruntime"
+```
+
+The PATH must contain `iree-compile` for hipDNN backend code generation. Check if
+`CMakeUserPresets.json` exists and provides a preset (e.g., `RelWithDebInfo-MLIR-local`)
+that sets up the environment automatically. If not, manually add iree-compile to PATH:
+```bash
 export PATH="$HOME/iree/build/RelWithDebInfo/tools:$PATH"
 ```
 
