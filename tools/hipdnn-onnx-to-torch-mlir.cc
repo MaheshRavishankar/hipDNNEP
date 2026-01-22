@@ -1,4 +1,4 @@
-// Copyright (c) 2024, hipDNN EP Authors. All rights reserved.
+// Copyright (c) 2026, hipDNN EP Authors. All rights reserved.
 // Licensed under the MIT License.
 //
 // Tool to load an ONNX model and print the generated Torch-MLIR to stdout.
