@@ -6,17 +6,50 @@
 #include "blas_graph.h"
 #include "ep_utils.h"
 #include "hipdnn_graph.h"
+#include "hipdnn_ep/ir_builder.h"
 
 #include <memory>
 #include <vector>
 
 namespace hipdnn_ep {
 
+/// @brief Configuration for Kernel construction using builder pattern
+struct KernelConfig {
+  // hipDNN
+  hipdnnHandle_t getHipDNNHandle() const { return hipdnn_handle_; }
+  KernelConfig& setHipDNNHandle(hipdnnHandle_t handle) {
+    hipdnn_handle_ = handle;
+    return *this;
+  }
+  bool useHipDNN() const { return hipdnn_handle_ != nullptr; }
+
+  // hipBLAS-LT
+  hipblaslt_handle_t getHipBlasLtHandle() const { return hipblaslt_handle_; }
+  KernelConfig& setHipBlasLtHandle(hipblaslt_handle_t handle) {
+    hipblaslt_handle_ = handle;
+    return *this;
+  }
+  bool useHipBlasLT() const { return hipblaslt_handle_ != nullptr; }
+
+  // Torch-MLIR
+  bool dumpTorchMlir() const { return dump_torch_mlir_; }
+  KernelConfig& setUseTorchMlir(bool dump = false) {
+    use_torch_mlir_ = true;
+    dump_torch_mlir_ = dump;
+    return *this;
+  }
+  bool useTorchMlir() const { return use_torch_mlir_; }
+
+ private:
+  hipdnnHandle_t hipdnn_handle_{nullptr};
+  hipblaslt_handle_t hipblaslt_handle_{nullptr};
+  bool dump_torch_mlir_{false};
+  bool use_torch_mlir_{false};
+};
+
 /// @brief Generic kernel that builds and executes hipDNN graphs or hipBLAS-LT matmuls
 struct Kernel {
-  /// @param hipblaslt_handle Optional hipBLAS-LT handle for MatMul/Gemm support (nullptr if unavailable)
-  Kernel(const OrtApi& ort_api, const OrtLogger& logger, hipdnnHandle_t handle,
-         hipblaslt_handle_t hipblaslt_handle = nullptr);
+  Kernel(const OrtApi& ort_api, const OrtLogger& logger, KernelConfig&& config);
   ~Kernel();
 
   /// @brief Build and compile graph from an ORT graph
@@ -28,14 +61,16 @@ struct Kernel {
  private:
   const OrtApi& ort_api_;
   const OrtLogger& logger_;
+  KernelConfig config_;
 
   // hipDNN graph (nullptr when using blas_graph_)
-  hipdnnHandle_t handle_;
   std::unique_ptr<HipDNNGraph> hipdnn_graph_;
 
   // hipBLAS-LT support (nullptr if unavailable or not used)
-  hipblaslt_handle_t hipblaslt_handle_{nullptr};
   std::unique_ptr<BlasGraph> blas_graph_;
+
+  // Torch-MLIR support
+  std::unique_ptr<IRBuilder> ir_builder_;
 };
 
 }  // namespace hipdnn_ep
