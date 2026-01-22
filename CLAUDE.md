@@ -101,6 +101,38 @@ Tests use Google Test framework. Run with:
 ctest --preset RelWithDebInfo --output-on-failure
 ```
 
+### Lit Tests (Torch-MLIR)
+
+Torch-MLIR IR generation tests use LLVM's lit framework with FileCheck. Run with:
+```bash
+cmake --build --preset RelWithDebInfo-MLIR --target check-torch-mlir
+```
+
+#### FileCheck Rules
+
+When writing CHECK lines, follow these conventions:
+
+1. **Align colons**: Pad CHECK directives so all `:` align vertically
+   ```
+   CHECK-LABEL: func_name
+         CHECK: module {
+    CHECK-SAME:   arg1
+   ```
+
+2. **Capture SSA variables**: Don't hardcode SSA names like `%0`. Capture with `%[[NAME:.*]]` and reference as `%[[NAME]]`. Keep `%` outside the capture:
+   ```
+   CHECK: %[[RESULT:.*]] = torch.operator
+   CHECK: return %[[RESULT]]
+   ```
+
+3. **Use CHECK-SAME for arguments**: Split long lines across multiple CHECK-SAME:
+   ```
+         CHECK: func.func @main
+    CHECK-SAME:   (%[[A:.*]]: !torch.vtensor<[2,3],f32>,
+    CHECK-SAME:    %[[B:.*]]: !torch.vtensor<[3,4],f32>)
+    CHECK-SAME:   -> !torch.vtensor<[2,4],f32>
+   ```
+
 ## Notes
 
 - Currently supports Conv2D, MatMul, and Gemm operations

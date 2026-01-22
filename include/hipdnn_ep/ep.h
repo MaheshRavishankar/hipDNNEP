@@ -24,7 +24,8 @@ class HipDNNEp : public OrtEp, public ApiPtrs {
  public:
   struct Config {
     bool enable_ep_context{false};
-    // Additional configuration options
+    bool use_torch_mlir{false};
+    bool dump_torch_mlir{false};  // Print generated MLIR to stdout
   };
 
   HipDNNEp(HipDNNEpFactory& factory, const Config& config, const OrtLogger& logger);

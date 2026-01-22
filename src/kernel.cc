@@ -3,16 +3,16 @@
 
 #include "hipdnn_ep/kernel.h"
 
+#include <iostream>
+
 namespace hipdnn_ep {
 
 //
 // Kernel implementation
 //
 
-Kernel::Kernel(const OrtApi& ort_api, const OrtLogger& logger, hipdnnHandle_t handle,
-               hipblaslt_handle_t hipblaslt_handle)
-    : ort_api_(ort_api), logger_(logger), handle_(handle), hipblaslt_handle_(hipblaslt_handle) {
-}
+Kernel::Kernel(const OrtApi& ort_api, const OrtLogger& logger, KernelConfig&& config)
+    : ort_api_(ort_api), logger_(logger), config_(std::move(config)) {}
 
 Kernel::~Kernel() = default;
 
@@ -23,9 +23,26 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
     std::vector<Ort::ConstValueInfo> graph_outputs = graph.GetOutputs();
     std::vector<Ort::ConstNode> nodes = graph.GetNodes();
 
+    // Use Torch-MLIR path if requested
+    if (config_.useTorchMlir()) {
+      ir_builder_ = std::make_unique<IRBuilder>();
+      if (!ir_builder_->BuildModule(graph_inputs, graph_outputs, nodes)) {
+        RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Failed to build Torch-MLIR module");
+      }
+      // TODO: Lower and compile the MLIR module
+      if (config_.dumpTorchMlir()) {
+        // Print to stdout for lit testing
+        std::cout << ir_builder_->PrintModule() << std::flush;
+      } else {
+        LOG(ort_api_, logger_, INFO, "Generated Torch-MLIR:\n"
+                                         << ir_builder_->PrintModule());
+      }
+      return nullptr;
+    }
+
     // Try hipBLAS-LT first if available
-    if (hipblaslt_handle_ != nullptr) {
-      blas_graph_ = std::make_unique<BlasGraph>(ort_api_, hipblaslt_handle_);
+    if (config_.useHipBlasLT()) {
+      blas_graph_ = std::make_unique<BlasGraph>(ort_api_, config_.getHipBlasLtHandle());
       OrtStatus* status = blas_graph_->Build(graph_inputs, graph_outputs, nodes);
       if (status == nullptr) {
         return nullptr;  // Success
@@ -36,8 +53,12 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
     }
 
     // Standard hipDNN graph path
-    hipdnn_graph_ = std::make_unique<HipDNNGraph>(ort_api_, handle_);
-    return hipdnn_graph_->Build(graph_inputs, graph_outputs, nodes);
+    if (config_.useHipDNN()) {
+      hipdnn_graph_ = std::make_unique<HipDNNGraph>(ort_api_, config_.getHipDNNHandle());
+      return hipdnn_graph_->Build(graph_inputs, graph_outputs, nodes);
+    }
+
+    RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Unable to build and compile graph");
 
   } catch (const std::exception& ex) {
     RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Exception building graph: " << ex.what());

@@ -1,0 +1,15 @@
+# -*- Python -*-
+# Copyright (c) 2024, hipDNN EP Authors. All rights reserved.
+# Licensed under the MIT License.
+
+import sys
+import os
+
+config.llvm_tools_dir = "@LLVM_TOOLS_BINARY_DIR@"
+config.hipdnn_obj_root = "@CMAKE_BINARY_DIR@"
+config.hipdnn_src_root = "@CMAKE_CURRENT_SOURCE_DIR@"
+config.filecheck_path = "@FILECHECK_PATH@"
+config.hipdnn_onnx_to_torch_mlir = "@CMAKE_BINARY_DIR@/hipdnn-onnx-to-torch-mlir"
+
+# Let the main config do the real work.
+lit_config.load_config(config, "@CMAKE_CURRENT_SOURCE_DIR@/test/lit/lit.cfg.py")

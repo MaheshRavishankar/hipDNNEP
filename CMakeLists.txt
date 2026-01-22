@@ -67,10 +67,6 @@ if(HIPDNN_EP_ENABLE_TORCH_MLIR)
   include(AddMLIR)
   include(HandleLLVMOptions)
 
-  # MLIR include directories
-  include_directories(${LLVM_INCLUDE_DIRS})
-  include_directories(${MLIR_INCLUDE_DIRS})
-
   # Torch-MLIR libraries (no CMake config file, so we find them directly)
   set(TORCH_MLIR_LIB_DIR "${TORCH_MLIR_INSTALL_DIR}/lib")
   set(TORCH_MLIR_INCLUDE_DIR "${TORCH_MLIR_INSTALL_DIR}/include")
@@ -108,6 +104,11 @@ if(hipblaslt_FOUND)
   set_source_files_properties(src/blas_graph.cc PROPERTIES LANGUAGE HIP)
 endif()
 
+# Add Torch-MLIR sources if enabled
+if(HIPDNN_EP_ENABLE_TORCH_MLIR)
+  list(APPEND HIPDNN_EP_SOURCES src/ir_builder.cc)
+endif()
+
 add_library(hipdnn_ep SHARED ${HIPDNN_EP_SOURCES})
 
 target_include_directories(hipdnn_ep
@@ -135,18 +136,24 @@ endif()
 if(HIPDNN_EP_ENABLE_TORCH_MLIR)
   target_compile_definitions(hipdnn_ep PRIVATE HIPDNN_EP_HAS_TORCH_MLIR)
 
-  # TODO: Add Torch-MLIR include directories and libraries when needed:
-  #   target_include_directories(hipdnn_ep PRIVATE
-  #     ${LLVM_INCLUDE_DIRS}
-  #     ${MLIR_INCLUDE_DIRS}
-  #     ${TORCH_MLIR_INCLUDE_DIR}
-  #   )
-  #   target_link_libraries(hipdnn_ep PRIVATE
-  #     ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchDialect.a
-  #     ...
-  #     MLIRFuncDialect
-  #     ...
-  #   )
+  # Add MLIR/LLVM includes only to ir_builder.cc
+  set_source_files_properties(src/ir_builder.cc PROPERTIES
+    INCLUDE_DIRECTORIES "${LLVM_INCLUDE_DIRS};${MLIR_INCLUDE_DIRS};${TORCH_MLIR_INCLUDE_DIR}"
+  )
+
+  # Link Torch-MLIR and MLIR libraries
+  # Note: TorchMLIRTorchDialect has transitive dependencies on TorchUtils,
+  # CastInterfaces, SparseTensorDialect, and DialectUtils
+  target_link_libraries(hipdnn_ep PRIVATE
+    ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchDialect.a
+    ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchUtils.a
+    MLIRFuncDialect
+    MLIRCastInterfaces
+    MLIRSparseTensorDialect
+    MLIRDialectUtils
+    MLIRIR
+    LLVMSupport
+  )
 endif()
 
 # Symbol visibility
@@ -168,6 +175,68 @@ endif()
 target_compile_definitions(hipdnn_ep PRIVATE
   ORT_API_MANUAL_INIT
 )
+
+# Tools for testing (only when Torch-MLIR is enabled)
+if(HIPDNN_EP_ENABLE_TORCH_MLIR)
+  # Find ONNXRuntime library for the tool
+  set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/build/RelWithDebInfo" CACHE PATH "ONNXRuntime library directory")
+  find_library(ONNXRUNTIME_LIB onnxruntime
+    HINTS ${ONNXRUNTIME_LIB_DIR}
+  )
+
+  if(ONNXRUNTIME_LIB)
+    add_executable(hipdnn-onnx-to-torch-mlir tools/hipdnn-onnx-to-torch-mlir.cc)
+    target_include_directories(hipdnn-onnx-to-torch-mlir PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/include
+      ${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session
+    )
+    target_compile_definitions(hipdnn-onnx-to-torch-mlir PRIVATE
+      ORT_API_MANUAL_INIT
+      HIPDNN_EP_LIB_PATH="$<TARGET_FILE:hipdnn_ep>"
+    )
+    target_link_libraries(hipdnn-onnx-to-torch-mlir PRIVATE
+      ${ONNXRUNTIME_LIB}
+      dl
+    )
+    add_dependencies(hipdnn-onnx-to-torch-mlir hipdnn_ep)
+
+    # Lit testing infrastructure
+    set(FILECHECK_PATH "${TORCH_MLIR_INSTALL_DIR}/bin/FileCheck")
+    if(EXISTS "${FILECHECK_PATH}")
+      configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/lit/lit.site.cfg.py.in
+        ${CMAKE_CURRENT_BINARY_DIR}/test/lit/lit.site.cfg.py
+        @ONLY
+      )
+
+      find_program(LIT_COMMAND
+        NAMES lit llvm-lit
+        HINTS
+          ${TORCH_MLIR_INSTALL_DIR}/bin
+          ${TORCH_MLIR_INSTALL_DIR}/../llvm-build/bin
+        DOC "Path to lit test runner"
+      )
+
+      if(LIT_COMMAND)
+        add_custom_target(check-torch-mlir
+          COMMAND ${LIT_COMMAND} ${CMAKE_CURRENT_BINARY_DIR}/test/lit -v
+          DEPENDS hipdnn-onnx-to-torch-mlir
+          COMMENT "Running Torch-MLIR lit tests"
+        )
+
+        add_test(NAME torch-mlir-lit-tests
+          COMMAND ${LIT_COMMAND} ${CMAKE_CURRENT_BINARY_DIR}/test/lit
+        )
+      else()
+        message(STATUS "lit not found - lit tests will not be available")
+      endif()
+    else()
+      message(STATUS "FileCheck not found at ${FILECHECK_PATH} - lit tests will not be available")
+    endif()
+  else()
+    message(WARNING "ONNXRuntime library not found at ${ONNXRUNTIME_LIB_DIR} - lit testing tool will not be built")
+  endif()
+endif()
 
 # Tests
 if(HIPDNN_EP_BUILD_TESTS)

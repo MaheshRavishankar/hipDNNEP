@@ -367,9 +367,13 @@ OrtStatus* ORT_API_CALL HipDNNEp::CompileImpl(
       }
 
       // Create kernel and build/compile the graph
-      // hipblaslt_handle_ is nullptr if hipBLAS-LT isn't available
-      auto kernel = std::make_unique<Kernel>(ep->ort_api, ep->logger_, ep->hipdnn_handle_,
-                                             ep->hipblaslt_handle_);
+      KernelConfig kernel_config;
+      kernel_config.setHipDNNHandle(ep->hipdnn_handle_)
+          .setHipBlasLtHandle(ep->hipblaslt_handle_);
+      if (ep->config_.use_torch_mlir) {
+        kernel_config.setUseTorchMlir(ep->config_.dump_torch_mlir);
+      }
+      auto kernel = std::make_unique<Kernel>(ep->ort_api, ep->logger_, std::move(kernel_config));
       RETURN_IF_ERROR(kernel->BuildAndCompile(graph));
 
       std::string fused_node_name = fused_node.GetName();
