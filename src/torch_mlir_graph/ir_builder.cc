@@ -3,6 +3,8 @@
 
 #include "hipdnn_ep/torch_mlir_graph/ir_builder.h"
 
+#ifdef HIPDNN_EP_HAS_TORCH_MLIR
+
 #include "hipdnn_ep/torch_mlir_graph/passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
@@ -348,3 +350,27 @@ bool IRBuilder::RunOffloadPipeline() {
 }
 
 }  // namespace hipdnn_ep
+
+#else  // !HIPDNN_EP_HAS_TORCH_MLIR
+
+namespace hipdnn_ep {
+
+// Define empty impl so unique_ptr can be destructed
+struct IRBuilderImpl {};
+
+IRBuilder::IRBuilder() = default;
+IRBuilder::~IRBuilder() = default;
+
+bool IRBuilder::BuildModule(const std::vector<Ort::ConstValueInfo>& /*inputs*/,
+                            const std::vector<Ort::ConstValueInfo>& /*outputs*/,
+                            const std::vector<Ort::ConstNode>& /*nodes*/) {
+  return false;
+}
+
+std::string IRBuilder::PrintModule() const { return ""; }
+
+bool IRBuilder::RunOffloadPipeline() { return false; }
+
+}  // namespace hipdnn_ep
+
+#endif  // HIPDNN_EP_HAS_TORCH_MLIR

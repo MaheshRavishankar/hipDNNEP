@@ -212,13 +212,8 @@ OrtStatus* ORT_API_CALL HipDNNEpFactory::CreateEpImpl(
   config.use_torch_mlir = (use_torch_mlir == "1");
   config.dump_torch_mlir = (dump_torch_mlir == "1");
 
-  try {
-    auto hipdnn_ep = std::make_unique<HipDNNEp>(*factory, config, *logger);
-    *ep = hipdnn_ep.release();
-  } catch (const std::exception& ex) {
-    return factory->ort_api.CreateStatus(ORT_EP_FAIL, ex.what());
-  }
-
+  auto hipdnn_ep = std::make_unique<HipDNNEp>(*factory, config, *logger);
+  *ep = hipdnn_ep.release();
   return nullptr;
 }
 

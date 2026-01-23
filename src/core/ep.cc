@@ -338,9 +338,6 @@ OrtStatus* ORT_API_CALL HipDNNEp::GetCapabilityImpl(
   } catch (const Ort::Exception& ex) {
     Ort::Status status(ex);
     return status.release();
-  } catch (const std::exception& ex) {
-    Ort::Status status(ex.what(), ORT_EP_FAIL);
-    return status.release();
   }
 
   return nullptr;
@@ -386,9 +383,6 @@ OrtStatus* ORT_API_CALL HipDNNEp::CompileImpl(
 
   } catch (const Ort::Exception& ex) {
     Ort::Status status(ex);
-    return status.release();
-  } catch (const std::exception& ex) {
-    Ort::Status status(ex.what(), ORT_EP_FAIL);
     return status.release();
   }
 

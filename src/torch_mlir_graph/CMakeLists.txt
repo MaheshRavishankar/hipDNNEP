@@ -1,6 +1,15 @@
 # Copyright (c) 2026, hipDNN EP Authors. All rights reserved.
 # Licensed under the MIT License.
 
+# IRBuilder sources (stub implementations used when Torch-MLIR not available)
+target_sources(hipdnn_ep PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/ir_builder.cc
+)
+
+if(NOT HIPDNN_EP_ENABLE_TORCH_MLIR)
+  return()
+endif()
+
 # Static library for MLIR passes (used by both hipdnn_ep and hipdnn-ep-opt)
 add_library(hipdnn_ep_passes STATIC
   passes.cc
@@ -33,11 +42,6 @@ target_link_libraries(hipdnn_ep_passes PUBLIC
 )
 
 add_dependencies(hipdnn_ep_passes HipDNNEpTorchMlirPassIncGen)
-
-# Add ir_builder to hipdnn_ep (pass library is linked separately)
-target_sources(hipdnn_ep PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/ir_builder.cc
-)
 
 # Add MLIR/LLVM includes and compile flags to ir_builder
 set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/ir_builder.cc
