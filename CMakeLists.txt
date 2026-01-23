@@ -18,6 +18,45 @@ if(HIPDNN_EP_ENABLE_TORCH_MLIR)
   if(NOT TORCH_MLIR_INSTALL_DIR)
     message(FATAL_ERROR "TORCH_MLIR_INSTALL_DIR must be specified when HIPDNN_EP_ENABLE_TORCH_MLIR is ON")
   endif()
+
+  # Find Torch-MLIR and MLIR
+  list(APPEND CMAKE_PREFIX_PATH "${TORCH_MLIR_INSTALL_DIR}/lib/cmake/mlir")
+  list(APPEND CMAKE_PREFIX_PATH "${TORCH_MLIR_INSTALL_DIR}/lib/cmake/llvm")
+
+  find_package(MLIR REQUIRED CONFIG)
+
+  message(STATUS "Found MLIR: ${MLIR_DIR}")
+  message(STATUS "Found LLVM: ${LLVM_DIR}")
+
+  # MLIR/LLVM CMake modules
+  list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+  list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+
+  include(TableGen)
+  include(AddLLVM)
+  include(AddMLIR)
+  include(HandleLLVMOptions)
+
+  # Torch-MLIR libraries (no CMake config file, so we find them directly)
+  set(TORCH_MLIR_LIB_DIR "${TORCH_MLIR_INSTALL_DIR}/lib")
+  set(TORCH_MLIR_INCLUDE_DIR "${TORCH_MLIR_INSTALL_DIR}/include")
+
+  # Lit testing tools
+  set(FILECHECK_PATH "${TORCH_MLIR_INSTALL_DIR}/bin/FileCheck")
+  if(NOT EXISTS "${FILECHECK_PATH}")
+    message(STATUS "FileCheck not found at ${FILECHECK_PATH} - pass lit tests will not be available")
+  endif()
+
+  find_program(LIT_COMMAND
+    NAMES lit llvm-lit
+    HINTS
+      ${TORCH_MLIR_INSTALL_DIR}/bin
+      ${TORCH_MLIR_INSTALL_DIR}/../llvm-build/bin
+    DOC "Path to lit test runner"
+  )
+  if(NOT LIT_COMMAND)
+    message(STATUS "lit not found - pass lit tests will not be available")
+  endif()
 endif()
 
 # TheRock installation root - contains HIP, hipDNN, and other ROCm components
@@ -78,9 +117,11 @@ target_link_libraries(hipdnn_ep
     hip::host
 )
 
-# Include src subdirectory for modular source/config management
+# Include subdirectories for modular source/config management
 # (must be after add_library since subdirectories use target_sources/target_link_libraries)
+add_subdirectory(include)
 add_subdirectory(src)
+add_subdirectory(tools)
 
 # Symbol visibility
 target_compile_definitions(hipdnn_ep PRIVATE HIPDNN_EP_EXPORTS)

@@ -1,10 +1,9 @@
 // Copyright (c) 2026, hipDNN EP Authors. All rights reserved.
 // Licensed under the MIT License.
 
-#ifdef HIPDNN_EP_HAS_TORCH_MLIR
-
 #include "hipdnn_ep/torch_mlir_graph/ir_builder.h"
 
+#include "hipdnn_ep/torch_mlir_graph/passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -175,6 +174,8 @@ struct IRBuilderImpl {
                    const std::vector<Ort::ConstNode>& nodes);
 
   std::string PrintModule() const;
+
+  bool RunOffloadPipeline();
 };
 
 bool IRBuilderImpl::BuildModule(
@@ -223,6 +224,13 @@ bool IRBuilderImpl::BuildModule(
   auto func_type = mlir::FunctionType::get(&ctx, arg_types, result_types);
   auto func = mlir::func::FuncOp::create(
       builder, mlir::UnknownLoc::get(&ctx), "main", func_type);
+
+  // Add ONNX opset version attribute (required by TorchOnnxToTorch pass)
+  // Note: Must be a signed integer type for torch-mlir to accept it
+  func->setAttr("torch.onnx_meta.opset_version",
+                mlir::IntegerAttr::get(
+                    mlir::IntegerType::get(&ctx, 64, mlir::IntegerType::Signed),
+                    14));
 
   // Create entry block with arguments
   mlir::Block* entry_block = func.addEntryBlock();
@@ -309,6 +317,13 @@ std::string IRBuilderImpl::PrintModule() const {
   return result;
 }
 
+bool IRBuilderImpl::RunOffloadPipeline() {
+  if (!module) {
+    return false;
+  }
+  return runHipDNNOffloadPipeline(module);
+}
+
 //
 // IRBuilder - public interface delegates to Impl
 //
@@ -328,31 +343,8 @@ std::string IRBuilder::PrintModule() const {
   return impl_->PrintModule();
 }
 
-}  // namespace hipdnn_ep
-
-#else  // !HIPDNN_EP_HAS_TORCH_MLIR
-
-// Stub implementation when Torch-MLIR is not available
-#include "hipdnn_ep/torch_mlir_graph/ir_builder.h"
-
-namespace hipdnn_ep {
-
-struct IRBuilderImpl {};
-
-IRBuilder::IRBuilder() : impl_(nullptr) {}
-IRBuilder::~IRBuilder() = default;
-
-bool IRBuilder::BuildModule(
-    const std::vector<Ort::ConstValueInfo>& /*inputs*/,
-    const std::vector<Ort::ConstValueInfo>& /*outputs*/,
-    const std::vector<Ort::ConstNode>& /*nodes*/) {
-  return false;
-}
-
-std::string IRBuilder::PrintModule() const {
-  return "";
+bool IRBuilder::RunOffloadPipeline() {
+  return impl_->RunOffloadPipeline();
 }
 
 }  // namespace hipdnn_ep
-
-#endif  // HIPDNN_EP_HAS_TORCH_MLIR

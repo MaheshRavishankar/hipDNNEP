@@ -29,6 +29,12 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
       if (!ir_builder_->BuildModule(graph_inputs, graph_outputs, nodes)) {
         RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Failed to build Torch-MLIR module");
       }
+
+      // Run the offload pipeline
+      if (!ir_builder_->RunOffloadPipeline()) {
+        RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Failed to run hipDNN offload pipeline");
+      }
+
       // TODO: Lower and compile the MLIR module
       if (config_.dumpTorchMlir()) {
         // Print to stdout for lit testing

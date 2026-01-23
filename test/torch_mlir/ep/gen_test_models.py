@@ -16,6 +16,9 @@ import sys
 def gen_matmul_model(output_dir):
     """Generate a MatMul model: Y = A @ B
 
+    After offload pipeline, the onnx.MatMul is converted to aten.matmul
+    and outlined into a hipdnn.graph region.
+
     Expected output:
     CHECK-LABEL: matmul
           CHECK: module {
@@ -23,10 +26,12 @@ def gen_matmul_model(output_dir):
      CHECK-SAME:     (%[[A:.*]]: !torch.vtensor<[2,3],f32>,
      CHECK-SAME:      %[[B:.*]]: !torch.vtensor<[3,4],f32>)
      CHECK-SAME:     -> !torch.vtensor<[2,4],f32>
-          CHECK:     %[[R:.*]] = torch.operator "onnx.MatMul"
+          CHECK:     %[[R:.*]] = torch.operator "hipdnn.graph"
      CHECK-SAME:       (%[[A]], %[[B]])
-     CHECK-SAME:       : (!torch.vtensor<[2,3],f32>, !torch.vtensor<[3,4],f32>)
-     CHECK-SAME:       -> !torch.vtensor<[2,4],f32>
+          CHECK:     ^bb0(%[[BA:.*]]: !torch.vtensor<[2,3],f32>,
+     CHECK-SAME:          %[[BB:.*]]: !torch.vtensor<[3,4],f32>)
+          CHECK:       %[[MM:.*]] = torch.aten.matmul %[[BA]], %[[BB]]
+          CHECK:       torch.operator_terminator %[[MM]]
           CHECK:     return %[[R]] : !torch.vtensor<[2,4],f32>
           CHECK:   }
           CHECK: }
@@ -49,6 +54,9 @@ def gen_matmul_model(output_dir):
 def gen_conv_model(output_dir):
     """Generate a Conv model
 
+    After offload pipeline, the onnx.Conv is converted to torch.aten.convolution
+    and outlined into a hipdnn.graph region.
+
     Expected output:
     CHECK-LABEL: conv
           CHECK: module {
@@ -56,12 +64,9 @@ def gen_conv_model(output_dir):
      CHECK-SAME:     (%[[X:.*]]: !torch.vtensor<[1,1,8,8],f32>,
      CHECK-SAME:      %[[W:.*]]: !torch.vtensor<[1,1,3,3],f32>)
      CHECK-SAME:     -> !torch.vtensor<[1,1,6,6],f32>
-          CHECK:     %[[R:.*]] = torch.operator "onnx.Conv"
-     CHECK-SAME:       (%[[X]], %[[W]])
-     CHECK-SAME:       torch.onnx.kernel_shape
-     CHECK-SAME:       torch.onnx.pads
-     CHECK-SAME:       torch.onnx.strides
-     CHECK-SAME:       -> !torch.vtensor<[1,1,6,6],f32>
+          CHECK:     %[[R:.*]] = torch.operator "hipdnn.graph"
+          CHECK:       torch.aten.convolution
+          CHECK:       torch.operator_terminator
           CHECK:     return %[[R]] : !torch.vtensor<[1,1,6,6],f32>
           CHECK:   }
           CHECK: }

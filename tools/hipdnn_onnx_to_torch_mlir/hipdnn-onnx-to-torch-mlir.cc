@@ -17,12 +17,13 @@
 #endif
 
 int main(int argc, char* argv[]) {
-  if (argc < 2) {
+  if (argc != 2) {
     std::cerr << "Usage: " << argv[0] << " <model.onnx>\n";
     return 1;
   }
 
   const char* model_path = argv[1];
+
   const char* lib_path = HIPDNN_EP_LIB_PATH;
 
   try {
