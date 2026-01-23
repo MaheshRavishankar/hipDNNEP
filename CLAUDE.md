@@ -4,21 +4,30 @@
 
 This is an out-of-tree ONNXRuntime Execution Provider (EP) that uses AMD's hipDNN library for accelerated inference on AMD GPUs. The EP is built as a plugin that can be dynamically loaded by ONNXRuntime.
 
+### Supported Operations
+
+- **Conv2D** - via hipDNN graph API
+- **MatMul/Gemm** - via hipBLAS-LT (optional, requires hipblaslt)
+
+### Optional Features
+
+- **hipBLAS-LT support** - Automatically enabled when hipblaslt is found. Provides optimized MatMul/Gemm operations.
+- **Torch-MLIR integration** - Experimental IR-based compilation pipeline. Enable with `HIPDNN_EP_ENABLE_TORCH_MLIR=ON`.
+
 ## Build Commands
 
 ### Standard Build (without Torch-MLIR)
 
 ```bash
-# Ensure iree-compile is in PATH
-export PATH="$HOME/iree/build/RelWithDebInfo/tools:$PATH"
-
 # Configure
 cmake --preset RelWithDebInfo
 
 # Build
 cmake --build --preset RelWithDebInfo
 
-# Test
+# Test (use -local preset if available, see "Local Presets" section)
+ctest --preset RelWithDebInfo-local
+# Or without local preset (requires iree-compile in PATH):
 ctest --preset RelWithDebInfo
 ```
 
@@ -58,7 +67,7 @@ cmake --preset RelWithDebInfo-MLIR
 # Build
 cmake --build --preset RelWithDebInfo-MLIR
 
-# Test (use -local variant which sets iree-compile PATH)
+# Test (use -local preset if available)
 ctest --preset RelWithDebInfo-MLIR-local
 ```
 
@@ -70,11 +79,38 @@ export THEROCK_DIST="/path/to/TheRock/build/dist/rocm"
 export ONNXRUNTIME_ROOT="/path/to/onnxruntime"
 ```
 
-The PATH must contain `iree-compile` for hipDNN backend code generation. Check if
-`CMakeUserPresets.json` exists and provides a preset (e.g., `RelWithDebInfo-MLIR-local`)
-that sets up the environment automatically. If not, manually add iree-compile to PATH:
+### Local Presets (Recommended)
+
+The hipDNN backend requires `iree-compile` in PATH for code generation. The recommended
+approach is to create a `CMakeUserPresets.json` file with local test presets that set
+the correct environment. This file is git-ignored and won't affect other developers.
+
+Example `CMakeUserPresets.json`:
+```json
+{
+  "version": 4,
+  "testPresets": [
+    {
+      "name": "RelWithDebInfo-local",
+      "inherits": "RelWithDebInfo",
+      "environment": {
+        "PATH": "/path/to/iree/build/tools:$penv{PATH}"
+      }
+    },
+    {
+      "name": "RelWithDebInfo-MLIR-local",
+      "inherits": "RelWithDebInfo-MLIR",
+      "environment": {
+        "PATH": "/path/to/iree/build/tools:$penv{PATH}"
+      }
+    }
+  ]
+}
+```
+
+If local presets are not available, manually add iree-compile to PATH before running tests:
 ```bash
-export PATH="$HOME/iree/build/RelWithDebInfo/tools:$PATH"
+export PATH="/path/to/iree/build/tools:$PATH"
 ```
 
 ## Git Workflow
@@ -102,17 +138,28 @@ export PATH="$HOME/iree/build/RelWithDebInfo/tools:$PATH"
 
 ## Testing
 
-Tests use Google Test framework. Run with:
+Tests use Google Test framework. **Important**: Use local presets (`-local` suffix) if
+available, as they set up the correct PATH for `iree-compile`.
+
 ```bash
+# Preferred: use local preset
+ctest --preset RelWithDebInfo-local --output-on-failure
+
+# Or with MLIR build
+ctest --preset RelWithDebInfo-MLIR-local --output-on-failure
+```
+
+If local presets are not available:
+```bash
+# Ensure iree-compile is in PATH first
+export PATH="/path/to/iree/build/tools:$PATH"
 ctest --preset RelWithDebInfo --output-on-failure
 ```
 
 ### Lit Tests (Torch-MLIR)
 
-Torch-MLIR IR generation tests use LLVM's lit framework with FileCheck. Run with:
-```bash
-cmake --build --preset RelWithDebInfo-MLIR --target check-torch-mlir
-```
+Torch-MLIR IR generation tests use LLVM's lit framework with FileCheck. These are
+automatically included in the test presets when Torch-MLIR is enabled.
 
 #### FileCheck Rules
 
@@ -141,10 +188,11 @@ When writing CHECK lines, follow these conventions:
 
 ## Notes
 
-- Currently supports Conv2D, MatMul, and Gemm operations
-- Uses hipDNN graph API (not legacy immediate API)
+- Conv2D via hipDNN graph API
+- MatMul/Gemm via hipBLAS-LT (when available)
 - Plugin EP v2 API for dynamic loading
-- Requires iree-compile in PATH for hipDNN backend code generation
+- Requires `iree-compile` in PATH for hipDNN backend code generation (use local presets)
+- Python tests require `onnx` package (install in `.venv` or system Python)
 
 ## Torch-MLIR Integration (Experimental)
 

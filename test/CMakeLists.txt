@@ -2,6 +2,10 @@
 # Licensed under the MIT License.
 
 # Find Python for generating test models
+# Use Python3_EXECUTABLE if set, otherwise default to local .venv
+if(NOT Python3_EXECUTABLE AND EXISTS "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+  set(Python3_EXECUTABLE "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+endif()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 # Find GTest

@@ -50,19 +50,13 @@ HIPDNN_EP_API OrtStatus* CreateEpFactories(
                                  "Not enough space for EP factory. Need at least 1.");
   }
 
-  try {
-    std::unique_ptr<OrtEpFactory> factory = std::make_unique<HipDNNEpFactory>(
-        registration_name,
-        ApiPtrs{*ort_api, *ep_api, *model_editor_api},
-        *default_logger);
+  auto factory = std::make_unique<HipDNNEpFactory>(
+      registration_name,
+      ApiPtrs{*ort_api, *ep_api, *model_editor_api},
+      *default_logger);
 
-    factories[0] = factory.release();
-    *num_factories = 1;
-
-  } catch (const std::exception& ex) {
-    return ort_api->CreateStatus(ORT_EP_FAIL, ex.what());
-  }
-
+  factories[0] = factory.release();
+  *num_factories = 1;
   return nullptr;
 }
 
