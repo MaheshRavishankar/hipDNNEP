@@ -47,6 +47,12 @@ class IRBuilder {
   /// Returns empty string if no module has been built.
   std::string PrintModule() const;
 
+  /// Run the hipDNN offload pipeline on the built module.
+  /// This converts onnx.* ops to aten.* ops and outlines supported ops
+  /// into hipdnn.graph regions.
+  /// @return true on success, false on error
+  bool RunOffloadPipeline();
+
  private:
   std::unique_ptr<IRBuilderImpl> impl_;
 };

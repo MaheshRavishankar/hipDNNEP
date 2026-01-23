@@ -9,7 +9,8 @@ config.llvm_tools_dir = "@LLVM_TOOLS_BINARY_DIR@"
 config.hipdnn_obj_root = "@CMAKE_BINARY_DIR@"
 config.hipdnn_src_root = "@CMAKE_SOURCE_DIR@"
 config.filecheck_path = "@FILECHECK_PATH@"
-config.hipdnn_onnx_to_torch_mlir = "@CMAKE_CURRENT_BINARY_DIR@/hipdnn-onnx-to-torch-mlir"
+config.hipdnn_onnx_to_torch_mlir = "@HIPDNN_ONNX_TO_TORCH_MLIR_PATH@"
+config.hipdnn_ep_opt = "@HIPDNN_EP_OPT_PATH@"
 
 # Let the main config do the real work.
 lit_config.load_config(config, "@CMAKE_CURRENT_SOURCE_DIR@/lit.cfg.py")

@@ -58,8 +58,8 @@ cmake --preset RelWithDebInfo-MLIR
 # Build
 cmake --build --preset RelWithDebInfo-MLIR
 
-# Test
-ctest --preset RelWithDebInfo-MLIR
+# Test (use -local variant which sets iree-compile PATH)
+ctest --preset RelWithDebInfo-MLIR-local
 ```
 
 ## Environment Setup
