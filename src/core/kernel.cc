@@ -5,6 +5,14 @@
 
 #include <iostream>
 
+// Convert Status to OrtStatus* at API boundaries.
+#define HIPDNN_STATUS_TO_ORT(ort_api, expr)                           \
+  [&]() -> OrtStatus* {                                               \
+    ::hipdnn_ep::Status _s = (expr);                                  \
+    if (_s.ok()) return nullptr;                                      \
+    return (ort_api).CreateStatus(ORT_EP_FAIL, _s.message().c_str()); \
+  }()
+
 namespace hipdnn_ep {
 
 //
@@ -59,8 +67,9 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
 
   // Standard hipDNN graph path
   if (config_.useHipDNN()) {
-    hipdnn_graph_ = std::make_unique<HipDNNGraph>(ort_api_, config_.getHipDNNHandle());
-    return hipdnn_graph_->Build(graph_inputs, graph_outputs, nodes);
+    hipdnn_graph_ = std::make_unique<HipDNNGraph>(config_.getHipDNNHandle());
+    return HIPDNN_STATUS_TO_ORT(ort_api_,
+                                hipdnn_graph_->Build(graph_inputs, graph_outputs, nodes));
   }
 
   RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Unable to build and compile graph");
@@ -71,7 +80,7 @@ OrtStatus* Kernel::Execute(OrtKernelContext* kernel_ctx) {
     return blas_graph_->Execute(kernel_ctx);
   }
   if (hipdnn_graph_) {
-    return hipdnn_graph_->Execute(kernel_ctx);
+    return HIPDNN_STATUS_TO_ORT(ort_api_, hipdnn_graph_->Execute(kernel_ctx));
   }
   RETURN_ERROR(ort_api_, ORT_EP_FAIL, "No compiled graph available for execution");
 }

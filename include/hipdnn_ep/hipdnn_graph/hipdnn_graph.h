@@ -4,6 +4,7 @@
 #pragma once
 
 #include "hipdnn_ep/core/ep_utils.h"
+#include "hipdnn_ep/hipdnn_graph/ep_status.h"
 
 #include <memory>
 #include <vector>
@@ -24,7 +25,7 @@ struct HipDNNGraphImpl;
 class HipDNNGraph {
  public:
   /// @param handle hipDNN handle
-  HipDNNGraph(const OrtApi& ort_api, hipdnnHandle_t handle);
+  explicit HipDNNGraph(hipdnnHandle_t handle);
   ~HipDNNGraph();
 
   // Non-copyable
@@ -35,13 +36,13 @@ class HipDNNGraph {
   /// @param graph_inputs The graph input value infos
   /// @param graph_outputs The graph output value infos
   /// @param nodes The nodes to process
-  OrtStatus* Build(const std::vector<Ort::ConstValueInfo>& graph_inputs,
-                   const std::vector<Ort::ConstValueInfo>& graph_outputs,
-                   const std::vector<Ort::ConstNode>& nodes);
+  Status Build(const std::vector<Ort::ConstValueInfo>& graph_inputs,
+               const std::vector<Ort::ConstValueInfo>& graph_outputs,
+               const std::vector<Ort::ConstNode>& nodes);
 
   /// @brief Execute the graph
   /// @param kernel_ctx The ORT kernel context with input/output tensors
-  OrtStatus* Execute(OrtKernelContext* kernel_ctx);
+  Status Execute(OrtKernelContext* kernel_ctx);
 
  private:
   std::unique_ptr<HipDNNGraphImpl> impl_;
