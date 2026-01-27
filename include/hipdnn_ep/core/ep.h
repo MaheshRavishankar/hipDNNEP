@@ -3,12 +3,12 @@
 
 #pragma once
 
+#include "hipdnn_ep/blas_graph/blas_graph.h"
+#include "hipdnn_ep/core/ort_api.h"
+
 #include <memory>
 #include <string>
 #include <unordered_map>
-
-#include "hipdnn_ep/blas_graph/blas_graph.h"
-#include "hipdnn_ep/core/ep_utils.h"
 
 // Forward declarations for hipDNN
 struct hipdnnHandle;

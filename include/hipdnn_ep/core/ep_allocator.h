@@ -3,7 +3,8 @@
 
 #pragma once
 
-#include "ep_utils.h"
+#include "hipdnn_ep/core/ort_api.h"
+
 #include <hip/hip_runtime.h>
 #include <mutex>
 #include <unordered_map>

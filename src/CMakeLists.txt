@@ -3,6 +3,7 @@
 
 # Include subdirectory CMakeLists for modular source/config management
 # (must be after add_library since they use target_sources/target_link_libraries)
+add_subdirectory(utils)
 add_subdirectory(core)
 add_subdirectory(hipdnn_graph)
 add_subdirectory(blas_graph)

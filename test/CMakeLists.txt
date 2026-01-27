@@ -37,6 +37,7 @@ endif()
 add_executable(hipdnn_ep_tests)
 
 target_include_directories(hipdnn_ep_tests PRIVATE
+  ${CMAKE_SOURCE_DIR}/include
   ${ONNXRUNTIME_INCLUDE_DIR}
 )
 

@@ -7,8 +7,10 @@ target_sources(hipdnn_ep PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/ep_allocator.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/ep_data_transfer.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/ep_factory.cc
-  ${CMAKE_CURRENT_SOURCE_DIR}/ep_utils.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/hipdnn_ep_exports.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/kernel.cc
   ${CMAKE_CURRENT_SOURCE_DIR}/node_compute_info.cc
 )
+
+# Link utils library
+target_link_libraries(hipdnn_ep PRIVATE hipdnn_ep_utils)

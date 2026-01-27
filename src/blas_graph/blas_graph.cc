@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "hipdnn_ep/blas_graph/blas_graph.h"
+#include "hipdnn_ep/utils/ep_utils.h"
 
 #ifdef HIPDNN_EP_HAS_HIPBLASLT
 

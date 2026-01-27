@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "hipdnn_ep/torch_mlir_graph/ir_builder.h"
+#include "hipdnn_ep/utils/ep_utils.h"
 
 #ifdef HIPDNN_EP_HAS_TORCH_MLIR
 
@@ -12,6 +13,9 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassManager.h"
+#include "torch-mlir/Conversion/TorchOnnxToTorch/Passes.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchDialect.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchTypes.h"
@@ -166,6 +170,9 @@ struct IRBuilderImpl {
   mlir::MLIRContext ctx;
   mlir::OwningOpRef<mlir::ModuleOp> module;
 
+  // Cache of compiled hipDNN graphs, keyed by unique name
+  llvm::StringMap<std::unique_ptr<HipDNNGraph>> compiled_graphs;
+
   IRBuilderImpl() {
     ctx.loadDialect<mlir::torch::Torch::TorchDialect>();
     ctx.loadDialect<mlir::func::FuncDialect>();
@@ -177,7 +184,11 @@ struct IRBuilderImpl {
 
   std::string PrintModule() const;
 
-  bool RunOffloadPipeline();
+  bool RunOffloadPipeline(hipdnnHandle_t handle);
+
+  HipDNNGraph* GetCompiledGraph(const std::string& name);
+
+  size_t GetCompiledGraphCount() const { return compiled_graphs.size(); }
 };
 
 bool IRBuilderImpl::BuildModule(
@@ -319,11 +330,46 @@ std::string IRBuilderImpl::PrintModule() const {
   return result;
 }
 
-bool IRBuilderImpl::RunOffloadPipeline() {
+bool IRBuilderImpl::RunOffloadPipeline(hipdnnHandle_t handle) {
   if (!module) {
     return false;
   }
-  return runHipDNNOffloadPipeline(module);
+
+  // Create output map for compiled graphs
+  auto output_graphs =
+      std::make_shared<llvm::StringMap<std::unique_ptr<HipDNNGraph>>>();
+
+  mlir::PassManager pm(module->getContext());
+
+  // Step 1: Convert onnx.* ops to aten.* ops
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::torch::onnx_c::createTorchOnnxToTorchPass());
+
+  // Step 2: Apply hipDNN offload pass
+  pm.addNestedPass<mlir::func::FuncOp>(createHipDNNOffloadPass());
+
+  // Step 3: Compile hipDNN graphs and transform to executables
+  pm.addNestedPass<mlir::func::FuncOp>(
+      createHipDNNGraphToExecutablePass(handle, output_graphs));
+
+  if (mlir::failed(pm.run(*module))) {
+    return false;
+  }
+
+  // Take ownership of all compiled graphs
+  for (auto& entry : *output_graphs) {
+    compiled_graphs[entry.first()] = std::move(entry.second);
+  }
+
+  return true;
+}
+
+HipDNNGraph* IRBuilderImpl::GetCompiledGraph(const std::string& name) {
+  auto it = compiled_graphs.find(name);
+  if (it == compiled_graphs.end()) {
+    return nullptr;
+  }
+  return it->second.get();
 }
 
 //
@@ -345,8 +391,16 @@ std::string IRBuilder::PrintModule() const {
   return impl_->PrintModule();
 }
 
-bool IRBuilder::RunOffloadPipeline() {
-  return impl_->RunOffloadPipeline();
+bool IRBuilder::RunOffloadPipeline(hipdnnHandle_t handle) {
+  return impl_->RunOffloadPipeline(handle);
+}
+
+HipDNNGraph* IRBuilder::GetCompiledGraph(const std::string& name) {
+  return impl_->GetCompiledGraph(name);
+}
+
+size_t IRBuilder::GetCompiledGraphCount() const {
+  return impl_->GetCompiledGraphCount();
 }
 
 }  // namespace hipdnn_ep
@@ -369,7 +423,13 @@ bool IRBuilder::BuildModule(const std::vector<Ort::ConstValueInfo>& /*inputs*/,
 
 std::string IRBuilder::PrintModule() const { return ""; }
 
-bool IRBuilder::RunOffloadPipeline() { return false; }
+bool IRBuilder::RunOffloadPipeline(hipdnnHandle_t /*handle*/) { return false; }
+
+HipDNNGraph* IRBuilder::GetCompiledGraph(const std::string& /*name*/) {
+  return nullptr;
+}
+
+size_t IRBuilder::GetCompiledGraphCount() const { return 0; }
 
 }  // namespace hipdnn_ep
 

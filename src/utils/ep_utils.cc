@@ -1,9 +1,48 @@
 // Copyright (c) 2025, hipDNN EP Authors. All rights reserved.
 // Licensed under the MIT License.
 
-#include "hipdnn_ep/core/ep_utils.h"
+#include "hipdnn_ep/utils/ep_utils.h"
 
 namespace hipdnn_ep {
+
+void IsFloatTensor(Ort::ConstValueInfo value_info, bool& result) {
+  result = false;
+
+  auto type_info = value_info.TypeInfo();
+  ONNXType onnx_type = type_info.GetONNXType();
+  if (onnx_type != ONNX_TYPE_TENSOR) {
+    return;
+  }
+
+  auto type_shape = type_info.GetTensorTypeAndShapeInfo();
+  ONNXTensorElementDataType elem_type = type_shape.GetElementType();
+  if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    return;
+  }
+  result = true;
+}
+
+std::optional<std::vector<int64_t>> GetTensorShape(Ort::ConstValueInfo value_info) {
+  const auto type_info = value_info.TypeInfo();
+  const auto onnx_type = type_info.GetONNXType();
+  if (onnx_type != ONNX_TYPE_TENSOR) {
+    return std::nullopt;
+  }
+
+  const auto type_shape = type_info.GetTensorTypeAndShapeInfo();
+  return type_shape.GetShape();
+}
+
+ONNXTensorElementDataType GetTensorElementType(Ort::ConstValueInfo value_info) {
+  const auto type_info = value_info.TypeInfo();
+  const auto onnx_type = type_info.GetONNXType();
+  if (onnx_type != ONNX_TYPE_TENSOR) {
+    return ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+  }
+
+  const auto type_shape = type_info.GetTensorTypeAndShapeInfo();
+  return type_shape.GetElementType();
+}
 
 std::string GetStringAttrOrDefault(Ort::ConstNode node, const char* name, const std::string& default_val) {
   Ort::ConstOpAttr attr{nullptr};

@@ -4,7 +4,6 @@
 #pragma once
 
 #include "hipdnn_ep/blas_graph/blas_graph.h"
-#include "hipdnn_ep/core/ep_utils.h"
 #include "hipdnn_ep/hipdnn_graph/hipdnn_graph.h"
 #include "hipdnn_ep/torch_mlir_graph/ir_builder.h"
 

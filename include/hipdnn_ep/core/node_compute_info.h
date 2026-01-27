@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "ep_utils.h"
+#include "hipdnn_ep/core/ort_api.h"
 
 namespace hipdnn_ep {
 

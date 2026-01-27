@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "hipdnn_ep/core/ep_utils.h"
+#include "hipdnn_ep/core/ort_api.h"
 
 #include <memory>
 #include <vector>
