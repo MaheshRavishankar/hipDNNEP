@@ -1,0 +1,173 @@
+// Copyright (c) 2026, hipDNN EP Authors. All rights reserved.
+// Licensed under the MIT License.
+
+#include "hipdnn_ep/hipdnn_graph/hipdnn_graph.h"
+#include "hipdnn_ep/torch_mlir_graph/passes.h"
+
+#include <hipdnn_backend.h>
+
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Region.h"
+#include "mlir/Pass/Pass.h"
+#include "torch-mlir/Dialect/Torch/IR/TorchDialect.h"
+#include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
+
+namespace hipdnn_ep {
+
+#define GEN_PASS_DEF_HIPDNNGRAPHTOEXECUTABLEPASS
+#include "hipdnn_ep/torch_mlir_graph/passes.h.inc"
+
+namespace {
+
+/// Compile a single hipdnn.graph region to a HipDNNGraph.
+///
+/// @param region The region containing the graph body (torch.aten ops)
+/// @param handle hipDNN handle for graph compilation
+/// @return Compiled graph on success, nullptr on failure
+static std::unique_ptr<HipDNNGraph> compileHipDNNGraph(mlir::Region& region,
+                                                       hipdnnHandle_t handle) {
+  if (handle == nullptr) {
+    return nullptr;
+  }
+
+  auto graph = std::make_unique<HipDNNGraph>(handle);
+
+  Status status = graph->Build(region);
+  if (status.failed()) {
+    return nullptr;
+  }
+
+  status = graph->Compile();
+  if (status.failed()) {
+    return nullptr;
+  }
+
+  return graph;
+}
+
+/// Replace a hipdnn.graph op with a hipdnn.executable op.
+/// Returns the new executable op.
+mlir::torch::Torch::OperatorOp replaceGraphWithExecutable(
+    mlir::IRRewriter& rewriter,
+    mlir::torch::Torch::OperatorOp graphOp,
+    const std::string& graph_name) {
+  auto loc = graphOp.getLoc();
+  rewriter.setInsertionPoint(graphOp);
+
+  auto execOp = mlir::torch::Torch::OperatorOp::create(
+      rewriter, loc, graphOp->getResultTypes(),
+      rewriter.getStringAttr("hipdnn.executable"), graphOp->getOperands(),
+      /*numRegions=*/0);
+
+  execOp->setAttr("graph_name", rewriter.getStringAttr(graph_name));
+  rewriter.replaceOp(graphOp, execOp->getResults());
+
+  return execOp;
+}
+
+}  // namespace
+
+//===----------------------------------------------------------------------===//
+// HipDNN Graph to Executable Pass
+//
+// This pass converts hipdnn.graph operations to hipdnn.executable operations.
+// It compiles each graph region using hipDNN and replaces the operation with
+// an executable reference.
+//
+// Two modes of operation:
+// 1. With explicit handle (production): Pass receives handle from caller,
+//    compiled graphs are stored in the provided output map.
+// 2. Self-managed handle (hipdnn-ep-opt): Pass creates its own handle.
+//    If no GPU is available, compilation fails and graphs remain unchanged.
+//===----------------------------------------------------------------------===//
+
+struct HipDNNGraphToExecutablePass
+    : public impl::HipDNNGraphToExecutablePassBase<HipDNNGraphToExecutablePass> {
+  using Base = impl::HipDNNGraphToExecutablePassBase<HipDNNGraphToExecutablePass>;
+
+  /// Constructor: always takes handle, owns_handle flag, and output map.
+  HipDNNGraphToExecutablePass(hipdnnHandle_t handle, bool owns_handle,
+                              CompiledGraphMap output_graphs)
+      : Base(),
+        handle_(handle),
+        owns_handle_(owns_handle),
+        output_graphs_(std::move(output_graphs)) {}
+
+  ~HipDNNGraphToExecutablePass() override {
+    // Note: We intentionally do not call hipdnnDestroy here.
+    // The hipDNN backend has a bug where hipdnnDestroy crashes.
+    // When owns_handle_ is true, the handle was created for a short-lived
+    // tool (hipdnn-ep-opt), so leaking the handle is acceptable.
+    // When owns_handle_ is false, the caller owns the handle and is
+    // responsible for its lifetime.
+  }
+
+  void runOnOperation() override;
+
+ private:
+  hipdnnHandle_t handle_;
+  bool owns_handle_;
+  CompiledGraphMap output_graphs_;
+};
+
+void HipDNNGraphToExecutablePass::runOnOperation() {
+  mlir::func::FuncOp func = getOperation();
+  mlir::IRRewriter rewriter(func->getContext());
+  int graph_count = 0;
+
+  // Collect hipdnn.graph ops first (can't modify while walking)
+  llvm::SmallVector<mlir::torch::Torch::OperatorOp> graphOps;
+  func->walk([&](mlir::torch::Torch::OperatorOp torchOp) {
+    if (torchOp.getName() == "hipdnn.graph") {
+      graphOps.push_back(torchOp);
+    }
+  });
+
+  // Process each graph: compile and transform to executable only on success
+  for (auto graphOp : graphOps) {
+    std::string graph_name = "hipdnn_graph_" + std::to_string(graph_count++);
+
+    // Get the region containing the graph body
+    if (graphOp.getNumRegions() != 1) {
+      // Invalid graph structure - skip it
+      continue;
+    }
+    mlir::Region& region = graphOp.getRegion(0);
+
+    // Try to compile the graph (may fail if no GPU or unsupported ops)
+    auto compiled_graph = compileHipDNNGraph(region, handle_);
+
+    if (!compiled_graph) {
+      // Compilation failed - leave the hipdnn.graph operation unchanged
+      // This allows fallback handling at runtime
+      continue;
+    }
+
+    // Compilation succeeded - store the compiled graph and transform IR
+    if (output_graphs_) {
+      (*output_graphs_)[graph_name] = std::move(compiled_graph);
+    }
+
+    // Transform hipdnn.graph -> hipdnn.executable
+    replaceGraphWithExecutable(rewriter, graphOp, graph_name);
+  }
+}
+
+std::unique_ptr<mlir::Pass> createHipDNNGraphToExecutablePass() {
+  hipdnnHandle_t handle = nullptr;
+  hipdnnStatus_t status = hipdnnCreate(&handle);
+  if (status != HIPDNN_STATUS_SUCCESS) {
+    return nullptr;
+  }
+  return std::make_unique<HipDNNGraphToExecutablePass>(
+      handle, /*owns_handle=*/true, /*output_graphs=*/nullptr);
+}
+
+std::unique_ptr<mlir::Pass> createHipDNNGraphToExecutablePass(
+    hipdnnHandle_t handle, CompiledGraphMap output_graphs) {
+  return std::make_unique<HipDNNGraphToExecutablePass>(
+      handle, /*owns_handle=*/false, std::move(output_graphs));
+}
+
+}  // namespace hipdnn_ep

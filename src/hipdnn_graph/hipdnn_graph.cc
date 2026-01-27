@@ -2,12 +2,22 @@
 // Licensed under the MIT License.
 
 #include "hipdnn_ep/hipdnn_graph/hipdnn_graph.h"
+#include "hipdnn_ep/utils/ep_utils.h"
 
 #include <hipdnn_backend.h>
 #include <hipdnn_frontend.hpp>
 
 #include <string>
 #include <unordered_map>
+
+#ifdef HIPDNN_EP_HAS_TORCH_MLIR
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/IR/Region.h"
+#include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
+#include "torch-mlir/Dialect/Torch/IR/TorchTypes.h"
+#endif
 
 namespace hipdnn_ep {
 
@@ -157,6 +167,158 @@ Status AddNode(
   return Status::Failure("Unsupported op type: " + op_type);
 }
 
+#ifdef HIPDNN_EP_HAS_TORCH_MLIR
+
+// Result struct for GetTensorInfo
+struct TensorInfo {
+  std::vector<int64_t> shape;
+  hipdnn_frontend::DataType dtype;
+};
+
+// Convert MLIR element type to hipDNN data type
+mlir::FailureOr<hipdnn_frontend::DataType> MLIRTypeToHipDNNDataType(
+    mlir::Location loc,
+    mlir::Type type) {
+  using hipdnn_frontend::DataType;
+  if (type.isF32()) {
+    return DataType::FLOAT;
+  }
+  if (type.isF16()) {
+    return DataType::HALF;
+  }
+  return mlir::emitError(loc) << "unsupported element type: " << type;
+}
+
+// Extract shape and element type from torch.vtensor type
+mlir::FailureOr<TensorInfo> GetTensorInfo(mlir::Location loc, mlir::Type type) {
+  auto vtensor = mlir::dyn_cast<mlir::torch::Torch::ValueTensorType>(type);
+  if (!vtensor) {
+    return mlir::emitError(loc) << "expected torch.vtensor type, got: " << type;
+  }
+  if (!vtensor.hasSizes()) {
+    return mlir::emitError(loc) << "vtensor type has no static shape";
+  }
+  if (!vtensor.hasDtype()) {
+    return mlir::emitError(loc) << "vtensor type has no dtype";
+  }
+
+  TensorInfo info;
+  auto sizes = vtensor.getSizes();
+  info.shape.assign(sizes.begin(), sizes.end());
+
+  auto dtype = MLIRTypeToHipDNNDataType(loc, vtensor.getDtype());
+  if (mlir::failed(dtype)) {
+    return mlir::failure();
+  }
+  info.dtype = *dtype;
+  return info;
+}
+
+// Create TensorAttributes from MLIR type
+mlir::FailureOr<TensorAttrPtr> CreateTensorAttrFromMLIR(
+    mlir::Location loc,
+    mlir::Type type,
+    int64_t uid,
+    const std::string& name) {
+  using hipdnn_frontend::graph::TensorAttributes;
+
+  auto info = GetTensorInfo(loc, type);
+  if (mlir::failed(info)) {
+    return mlir::failure();
+  }
+
+  auto attr = std::make_shared<TensorAttributes>();
+  attr->set_uid(uid)
+      .set_name(name)
+      .set_data_type(info->dtype)
+      .set_dim(info->shape)
+      .set_stride(ComputeStrides(info->shape));
+
+  return attr;
+}
+
+// Add Conv operation from MLIR op to hipDNN graph
+Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
+                           mlir::Operation* op,
+                           const std::vector<TensorAttrPtr>& input_attrs,
+                           TensorAttrPtr& output_attr) {
+  using namespace hipdnn_frontend::graph;
+  using hipdnn_frontend::ConvolutionMode;
+
+  if (input_attrs.size() < 2) {
+    return Status::Failure("Conv requires at least 2 input tensor attributes");
+  }
+
+  const auto& x_attr = input_attrs[0];
+  const auto& w_attr = input_attrs[1];
+
+  std::vector<int64_t> pads = {0, 0, 0, 0};
+  std::vector<int64_t> strides = {1, 1};
+  std::vector<int64_t> dilations = {1, 1};
+
+  if (auto convOp = mlir::dyn_cast<mlir::torch::Torch::AtenConvolutionOp>(op)) {
+    llvm::SmallVector<int64_t> strideVals;
+    if (mlir::matchPattern(
+            convOp.getStride(),
+            mlir::torch::Torch::m_TorchListOfConstantInts(strideVals))) {
+      strides.assign(strideVals.begin(), strideVals.end());
+    }
+
+    llvm::SmallVector<int64_t> padVals;
+    if (mlir::matchPattern(
+            convOp.getPadding(),
+            mlir::torch::Torch::m_TorchListOfConstantInts(padVals))) {
+      if (padVals.size() == 2) {
+        pads = {padVals[0], padVals[1], padVals[0], padVals[1]};
+      }
+    }
+
+    llvm::SmallVector<int64_t> dilationVals;
+    if (mlir::matchPattern(
+            convOp.getDilation(),
+            mlir::torch::Torch::m_TorchListOfConstantInts(dilationVals))) {
+      dilations.assign(dilationVals.begin(), dilationVals.end());
+    }
+  }
+
+  auto compute_dtype =
+      GetComputeDataType(x_attr->get_data_type(), w_attr->get_data_type());
+  if (!compute_dtype.has_value()) {
+    return Status::Failure("Unsupported data type combination for Conv compute");
+  }
+
+  ConvFpropAttributes conv_attrs;
+  conv_attrs.set_padding({pads[0], pads[1]})
+      .set_stride({strides[0], strides[1]})
+      .set_dilation({dilations[0], dilations[1]})
+      .set_convolution_mode(ConvolutionMode::CROSS_CORRELATION)
+      .set_compute_data_type(compute_dtype.value());
+
+  output_attr = graph.conv_fprop(x_attr, w_attr, conv_attrs);
+
+  return Status::Success();
+}
+
+// Dispatch MLIR op to appropriate Add*Node function
+Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
+                       mlir::Operation* op,
+                       const std::vector<TensorAttrPtr>& input_attrs,
+                       std::vector<TensorAttrPtr>& output_attrs) {
+  llvm::StringRef op_name = op->getName().getStringRef();
+
+  if (op_name == "torch.aten.convolution" || op_name == "torch.aten.conv2d") {
+    TensorAttrPtr y_attr;
+    auto status = AddConvNodeFromMLIR(graph, op, input_attrs, y_attr);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  return Status::Failure("Unsupported MLIR op type: " + op_name.str());
+}
+
+#endif  // HIPDNN_EP_HAS_TORCH_MLIR
+
 }  // namespace
 
 //
@@ -170,11 +332,15 @@ struct HipDNNGraphImpl {
                const std::vector<Ort::ConstValueInfo>& graph_outputs,
                const std::vector<Ort::ConstNode>& nodes);
 
+#ifdef HIPDNN_EP_HAS_TORCH_MLIR
+  Status Build(mlir::Region& region);
+#endif
+
+  Status Compile();
+
   Status Execute(OrtKernelContext* kernel_ctx);
 
  private:
-  Status Compile();
-
   hipdnnHandle_t handle_;
 
   // hipDNN graph
@@ -285,9 +451,119 @@ Status HipDNNGraphImpl::Build(
     output_uids_.push_back(it->second->get_uid());
   }
 
-  // Compile the graph
-  return Compile();
+  return Status::Success();
 }
+
+#ifdef HIPDNN_EP_HAS_TORCH_MLIR
+Status HipDNNGraphImpl::Build(mlir::Region& region) {
+  using namespace hipdnn_frontend::graph;
+
+  if (region.empty()) {
+    return Status::Failure("Empty region in hipdnn.graph");
+  }
+
+  mlir::Block& block = region.front();
+
+  auto* terminator = block.getTerminator();
+  if (!terminator) {
+    return Status::Failure("Region has no terminator");
+  }
+
+  output_shapes_.reserve(terminator->getNumOperands());
+  for (mlir::Value output : terminator->getOperands()) {
+    auto info = GetTensorInfo(output.getLoc(), output.getType());
+    if (mlir::failed(info)) {
+      return Status::Failure("Failed to get tensor info for output");
+    }
+    output_shapes_.push_back(info->shape);
+  }
+
+  graph_ = std::make_unique<Graph>();
+
+  llvm::DenseMap<mlir::Value, TensorAttrPtr> value_map;
+
+  // Only process tensor-type block arguments (skip non-tensor args like
+  // !torch.none, !torch.list<int>, etc.)
+  for (auto [idx, arg] : llvm::enumerate(block.getArguments())) {
+    if (!mlir::isa<mlir::torch::Torch::ValueTensorType>(arg.getType())) {
+      continue;
+    }
+    std::string name = "input_" + std::to_string(idx);
+    auto attr =
+        CreateTensorAttrFromMLIR(arg.getLoc(), arg.getType(), next_uid_++, name);
+    if (mlir::failed(attr)) {
+      return Status::Failure("Failed to create tensor attr for input " +
+                             std::to_string(idx));
+    }
+    (*attr)->set_is_virtual(false);
+    value_map[arg] = *attr;
+    input_uids_.push_back((*attr)->get_uid());
+  }
+
+  for (mlir::Operation& op : block.without_terminator()) {
+    if (op.getNumResults() == 0) {
+      continue;
+    }
+
+    bool hasTensorResult = false;
+    for (mlir::Value result : op.getResults()) {
+      if (mlir::isa<mlir::torch::Torch::ValueTensorType>(result.getType())) {
+        hasTensorResult = true;
+        break;
+      }
+    }
+    if (!hasTensorResult) {
+      continue;
+    }
+
+    std::vector<TensorAttrPtr> input_attrs;
+    for (mlir::Value operand : op.getOperands()) {
+      auto it = value_map.find(operand);
+      if (it != value_map.end()) {
+        input_attrs.push_back(it->second);
+      }
+    }
+
+    std::vector<TensorAttrPtr> output_attrs;
+    auto status = AddNodeFromMLIR(*graph_, &op, input_attrs, output_attrs);
+    if (status.failed()) return status;
+
+    size_t tensor_result_idx = 0;
+    for (mlir::Value result : op.getResults()) {
+      if (!mlir::isa<mlir::torch::Torch::ValueTensorType>(result.getType())) {
+        continue;
+      }
+      if (tensor_result_idx >= output_attrs.size()) {
+        break;
+      }
+
+      TensorAttrPtr& attr = output_attrs[tensor_result_idx++];
+      auto info = GetTensorInfo(result.getLoc(), result.getType());
+      if (mlir::failed(info)) {
+        return Status::Failure("Failed to get tensor info for op result");
+      }
+      attr->set_uid(next_uid_++)
+          .set_name("v" + std::to_string(attr->get_uid()))
+          .set_data_type(info->dtype)
+          .set_dim(info->shape)
+          .set_stride(ComputeStrides(info->shape));
+      value_map[result] = attr;
+    }
+  }
+
+  output_uids_.reserve(terminator->getNumOperands());
+  for (mlir::Value output : terminator->getOperands()) {
+    auto it = value_map.find(output);
+    if (it == value_map.end()) {
+      return Status::Failure("Output value not found in value map");
+    }
+    it->second->set_is_virtual(false);
+    output_uids_.push_back(it->second->get_uid());
+  }
+
+  return Status::Success();
+}
+#endif  // HIPDNN_EP_HAS_TORCH_MLIR
 
 Status HipDNNGraphImpl::Compile() {
   using hipdnn_frontend::HeuristicMode;
@@ -390,6 +666,16 @@ Status HipDNNGraph::Build(
     const std::vector<Ort::ConstValueInfo>& graph_outputs,
     const std::vector<Ort::ConstNode>& nodes) {
   return impl_->Build(graph_inputs, graph_outputs, nodes);
+}
+
+#ifdef HIPDNN_EP_HAS_TORCH_MLIR
+Status HipDNNGraph::Build(mlir::Region& region) {
+  return impl_->Build(region);
+}
+#endif
+
+Status HipDNNGraph::Compile() {
+  return impl_->Compile();
 }
 
 Status HipDNNGraph::Execute(OrtKernelContext* kernel_ctx) {

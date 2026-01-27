@@ -4,10 +4,7 @@
 #include <gtest/gtest.h>
 #include <string>
 
-#ifndef ORT_API_MANUAL_INIT
-#define ORT_API_MANUAL_INIT
-#endif
-#include "onnxruntime_cxx_api.h"
+#include "hipdnn_ep/core/ort_api.h"
 
 #ifndef HIPDNN_EP_LIB_PATH
 #define HIPDNN_EP_LIB_PATH "./libhipdnn_ep.so"

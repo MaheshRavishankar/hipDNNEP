@@ -37,4 +37,37 @@ def HipDNNOffloadPass : Pass<"hipdnn-offload", "mlir::func::FuncOp"> {
   ];
 }
 
+def HipDNNGraphToExecutablePass : Pass<"hipdnn-graph-to-executable", "mlir::func::FuncOp"> {
+  let summary = "Convert hipdnn.graph operations to hipdnn.executable operations";
+  let description = [{
+    This pass converts `torch.operator "hipdnn.graph"` operations (which contain
+    regions with torch.aten ops) to `torch.operator "hipdnn.executable"` operations
+    (which reference pre-compiled hipDNN graphs by name).
+
+    This pass compiles each hipdnn.graph region using hipDNN and stores the
+    compiled graph for later execution.
+
+    Example transformation:
+    ```mlir
+    // Before:
+    %0 = torch.operator "hipdnn.graph"(%input, %weight) ({
+    ^bb0(%arg0, %arg1):
+      %1 = torch.aten.convolution %arg0, %arg1, ... -> ...
+      torch.operator_terminator %1
+    }) : ...
+
+    // After:
+    %0 = torch.operator "hipdnn.executable"(%input, %weight) {graph_name = "hipdnn_graph_0"} : ...
+    ```
+  }];
+
+  let dependentDialects = [
+    "mlir::torch::Torch::TorchDialect",
+    "mlir::func::FuncDialect"
+  ];
+
+  // Use custom constructor - prevents tablegen from generating default create function
+  let constructor = "::hipdnn_ep::createHipDNNGraphToExecutablePass()";
+}
+
 #endif // HIPDNN_EP_TORCH_MLIR_GRAPH_PASSES

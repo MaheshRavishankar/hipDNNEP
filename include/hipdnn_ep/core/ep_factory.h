@@ -3,12 +3,12 @@
 
 #pragma once
 
-#include <mutex>
-#include <memory>
+#include "hipdnn_ep/core/ep_allocator.h"
+#include "hipdnn_ep/core/ep_data_transfer.h"
+#include "hipdnn_ep/core/ort_api.h"
 
-#include "ep_utils.h"
-#include "ep_allocator.h"
-#include "ep_data_transfer.h"
+#include <memory>
+#include <mutex>
 
 namespace hipdnn_ep {
 

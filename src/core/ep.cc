@@ -5,6 +5,7 @@
 #include "hipdnn_ep/core/ep_factory.h"
 #include "hipdnn_ep/core/kernel.h"
 #include "hipdnn_ep/core/node_compute_info.h"
+#include "hipdnn_ep/utils/ep_utils.h"
 
 #include "hipdnn_ep/blas_graph/blas_graph.h"
 

@@ -3,9 +3,10 @@
 
 #pragma once
 
-#include "hipdnn_ep/core/ep_utils.h"
+#include "hipdnn_ep/hipdnn_graph/hipdnn_graph.h"
 
 #include <memory>
+#include <string>
 
 namespace hipdnn_ep {
 
@@ -47,11 +48,26 @@ class IRBuilder {
   /// Returns empty string if no module has been built.
   std::string PrintModule() const;
 
-  /// Run the hipDNN offload pipeline on the built module.
-  /// This converts onnx.* ops to aten.* ops and outlines supported ops
-  /// into hipdnn.graph regions.
+  /// Run the hipDNN offload and compilation pipeline on the built module.
+  ///
+  /// This method:
+  /// 1. Converts onnx.* ops to aten.* ops (TorchOnnxToTorch)
+  /// 2. Outlines supported ops into hipdnn.graph regions (HipDNNOffloadPass)
+  /// 3. Compiles each graph region using hipDNN
+  /// 4. Stores compiled graphs in the internal cache (retrievable via GetCompiledGraph)
+  /// 5. Transforms the IR: replaces hipdnn.graph ops with hipdnn.executable ops
+  ///
+  /// @param handle hipDNN handle for graph compilation
   /// @return true on success, false on error
-  bool RunOffloadPipeline();
+  bool RunOffloadPipeline(hipdnnHandle_t handle);
+
+  /// Get a compiled graph by name from the cache.
+  /// @param name The unique name of the compiled graph
+  /// @return Pointer to the compiled graph, or nullptr if not found
+  HipDNNGraph* GetCompiledGraph(const std::string& name);
+
+  /// Get the number of compiled graphs in the cache.
+  size_t GetCompiledGraphCount() const;
 
  private:
   std::unique_ptr<IRBuilderImpl> impl_;

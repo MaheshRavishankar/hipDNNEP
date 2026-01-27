@@ -5,6 +5,12 @@
 
 #include <memory>
 
+#include "llvm/ADT/StringMap.h"
+
+// Forward declarations for hipDNN
+struct hipdnnHandle;
+typedef hipdnnHandle* hipdnnHandle_t;
+
 namespace mlir {
 class ModuleOp;
 class Pass;
@@ -14,19 +20,31 @@ class OwningOpRef;
 
 namespace hipdnn_ep {
 
-#define GEN_PASS_DECL_HIPDNNOFFLOADPASS
+class HipDNNGraph;
+
+/// Map of compiled hipDNN graphs, keyed by graph name.
+/// Used to pass compiled graphs out of the HipDNNGraphToExecutablePass.
+using CompiledGraphMap = std::shared_ptr<llvm::StringMap<std::unique_ptr<HipDNNGraph>>>;
+
+// Generate pass declarations. HipDNNGraphToExecutablePass uses a custom
+// constructor (set in passes.td), so tablegen won't generate its create function.
+#define GEN_PASS_DECL
 #include "hipdnn_ep/torch_mlir_graph/passes.h.inc"
 
 /// Register all HipDNN EP passes with the MLIR pass registry.
 /// This is used by the hipdnn-ep-opt tool.
 void registerPasses();
 
-/// Run the full hipDNN offload pipeline on the module:
-/// 1. TorchOnnxToTorch conversion (onnx.* → aten.*)
-/// 2. HipDNN offload patterns (aten.* → hipdnn.graph regions)
+/// Create the HipDNNGraphToExecutablePass with a self-managed hipDNN handle.
+/// This is used by hipdnn-ep-opt for testing. Compiled graphs are discarded.
+std::unique_ptr<mlir::Pass> createHipDNNGraphToExecutablePass();
+
+/// Create the HipDNNGraphToExecutablePass with an explicit hipDNN handle.
+/// Compiled graphs are stored in the output map for later execution.
 ///
-/// @param module The module to transform (modified in place)
-/// @return true on success, false on failure
-bool runHipDNNOffloadPipeline(mlir::OwningOpRef<mlir::ModuleOp>& module);
+/// @param handle hipDNN handle for graph compilation (must not be nullptr)
+/// @param output_graphs Map to store compiled graphs (can be nullptr to discard)
+std::unique_ptr<mlir::Pass> createHipDNNGraphToExecutablePass(
+    hipdnnHandle_t handle, CompiledGraphMap output_graphs);
 
 }  // namespace hipdnn_ep

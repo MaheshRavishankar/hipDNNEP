@@ -14,6 +14,7 @@ endif()
 add_library(hipdnn_ep_passes STATIC
   passes.cc
   hipdnn_offload_pass.cc
+  hipdnn_graph_to_executable_pass.cc
 )
 
 target_include_directories(hipdnn_ep_passes PUBLIC
@@ -28,6 +29,7 @@ target_compile_options(hipdnn_ep_passes PRIVATE -fno-rtti)
 target_compile_definitions(hipdnn_ep_passes PUBLIC HIPDNN_EP_HAS_TORCH_MLIR)
 
 target_link_libraries(hipdnn_ep_passes PUBLIC
+  hipdnn_ep_graph
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchOnnxToTorch.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchDialect.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchUtils.a
