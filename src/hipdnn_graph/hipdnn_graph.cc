@@ -7,6 +7,9 @@
 #include <hipdnn_backend.h>
 #include <hipdnn_frontend.hpp>
 
+#include <hip/hip_runtime_api.h>
+
+#include <numeric>
 #include <string>
 #include <unordered_map>
 
@@ -67,6 +70,30 @@ std::optional<hipdnn_frontend::DataType> GetComputeDataType(
 }
 
 using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
+
+// Scalar constant that needs device memory at execution time.
+struct ConstantScalar {
+  int64_t uid;
+  float value;
+};
+
+// Create a scalar TensorAttributes for pointwise ops.
+// The value is tracked in `constants` for device memory allocation.
+static TensorAttrPtr CreateScalarTensorAttr(
+    int64_t uid,
+    hipdnn_frontend::DataType dtype,
+    float value,
+    std::vector<ConstantScalar>& constants) {
+  auto attr = std::make_shared<hipdnn_frontend::graph::TensorAttributes>();
+  attr->set_uid(uid)
+      .set_name("constant_" + std::to_string(uid))
+      .set_data_type(dtype)
+      .set_dim({1})
+      .set_stride({1})
+      .set_is_virtual(false);
+  constants.push_back({uid, value});
+  return attr;
+}
 
 // Create TensorAttributes from a ConstValueInfo
 Status CreateTensorAttr(
@@ -147,18 +174,138 @@ Status AddConvNode(
   return Status::Success();
 }
 
+// Apply a permutation to a tensor's dims and strides.
+// This is a zero-copy operation — same data buffer, different view.
+// `perm` maps new axis i to old axis perm[i], e.g. {1, 0} transposes a 2D
+// tensor and {0, 2, 1} swaps the last two axes of a 3D tensor.
+static void PermuteTensorAttr(TensorAttrPtr& attr,
+                              const std::vector<int64_t>& perm) {
+  auto dims = attr->get_dim();
+  auto strides = attr->get_stride();
+  std::vector<int64_t> new_dims(perm.size());
+  std::vector<int64_t> new_strides(perm.size());
+  for (size_t i = 0; i < perm.size(); ++i) {
+    new_dims[i] = dims[perm[i]];
+    new_strides[i] = strides[perm[i]];
+  }
+  attr->set_dim(new_dims).set_stride(new_strides);
+}
+
+// Add MatMul/Gemm operation to hipDNN graph
+// MatMul: Y = A @ B
+// Gemm: Y = alpha * A' * B' + beta * C
+//   Transpose via stride manipulation, alpha/beta via pointwise ops
+Status AddMatMulNode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    TensorAttrPtr& output_attr,
+    int64_t& next_uid,
+    std::vector<ConstantScalar>& constants) {
+  using namespace hipdnn_frontend::graph;
+  using hipdnn_frontend::PointwiseMode;
+
+  if (input_attrs.size() < 2) {
+    return Status::Failure("MatMul/Gemm requires at least 2 input tensor attributes");
+  }
+
+  // Gemm-specific attributes (defaults match MatMul semantics)
+  int64_t trans_a = GetIntAttrOrDefault(node, "transA", 0);
+  int64_t trans_b = GetIntAttrOrDefault(node, "transB", 0);
+  float alpha = GetFloatAttrOrDefault(node, "alpha", 1.0f);
+  float beta = GetFloatAttrOrDefault(node, "beta", 1.0f);
+
+  auto a_attr = input_attrs[0];
+  auto b_attr = input_attrs[1];
+
+  // Handle transpose by permuting dims and strides (zero-copy).
+  // Gemm transA/transB swap the last two axes.
+  if (trans_a != 0 || trans_b != 0) {
+    size_t rank = a_attr->get_dim().size();
+    std::vector<int64_t> perm(rank);
+    std::iota(perm.begin(), perm.end(), 0);
+    std::swap(perm[rank - 2], perm[rank - 1]);
+    if (trans_a != 0) {
+      PermuteTensorAttr(a_attr, perm);
+    }
+    if (trans_b != 0) {
+      PermuteTensorAttr(b_attr, perm);
+    }
+  }
+
+  auto compute_dtype = GetComputeDataType(a_attr->get_data_type(), b_attr->get_data_type());
+  if (!compute_dtype.has_value()) {
+    return Status::Failure("Unsupported data type combination for MatMul/Gemm compute");
+  }
+
+  // matmul: result = A @ B
+  MatmulAttributes matmul_attrs;
+  matmul_attrs.set_compute_data_type(compute_dtype.value());
+  auto result = graph.matmul(a_attr, b_attr, matmul_attrs);
+
+  // When chaining ops, intermediate virtual tensors need their data type set
+  // (Build() only sets properties on the final graph output).
+  auto dtype = compute_dtype.value();
+  auto set_intermediate_dtype = [&](TensorAttrPtr& t) {
+    t->set_data_type(dtype);
+  };
+
+  // alpha scaling: result = alpha * (A @ B)
+  if (alpha != 1.0f) {
+    set_intermediate_dtype(result);
+    auto alpha_attr = CreateScalarTensorAttr(next_uid++, dtype, alpha, constants);
+    PointwiseAttributes pw;
+    pw.set_mode(PointwiseMode::MUL).set_compute_data_type(dtype);
+    result = graph.pointwise(result, alpha_attr, pw);
+  }
+
+  // bias: result = result + beta * C
+  bool has_bias = (beta != 0.0f && input_attrs.size() >= 3);
+  if (has_bias) {
+    set_intermediate_dtype(result);
+    auto bias = input_attrs[2];
+
+    // Scale bias if beta != 1.0
+    if (beta != 1.0f) {
+      auto beta_attr = CreateScalarTensorAttr(next_uid++, dtype, beta, constants);
+      PointwiseAttributes pw;
+      pw.set_mode(PointwiseMode::MUL).set_compute_data_type(dtype);
+      bias = graph.pointwise(bias, beta_attr, pw);
+      set_intermediate_dtype(bias);
+    }
+
+    PointwiseAttributes add;
+    add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
+    result = graph.pointwise(result, bias, add);
+  }
+
+  output_attr = result;
+  return Status::Success();
+}
+
 // Dispatch to appropriate Add*Node based on op_type
 // Takes input tensor attributes, returns output tensor attributes
 Status AddNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
     const std::vector<TensorAttrPtr>& input_attrs,
-    std::vector<TensorAttrPtr>& output_attrs) {
+    std::vector<TensorAttrPtr>& output_attrs,
+    int64_t& next_uid,
+    std::vector<ConstantScalar>& constants) {
   std::string op_type = node.GetOperatorType();
 
   if (op_type == "Conv") {
     TensorAttrPtr y_attr;
     auto status = AddConvNode(graph, node, input_attrs, y_attr);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (op_type == "MatMul" || op_type == "Gemm") {
+    TensorAttrPtr y_attr;
+    auto status = AddMatMulNode(
+        graph, node, input_attrs, y_attr, next_uid, constants);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -328,6 +475,12 @@ Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
 struct HipDNNGraphImpl {
   explicit HipDNNGraphImpl(hipdnnHandle_t handle) : handle_(handle) {}
 
+  ~HipDNNGraphImpl() {
+    if (constants_device_ptr_) {
+      (void)hipFree(constants_device_ptr_);
+    }
+  }
+
   Status Build(const std::vector<Ort::ConstValueInfo>& graph_inputs,
                const std::vector<Ort::ConstValueInfo>& graph_outputs,
                const std::vector<Ort::ConstNode>& nodes);
@@ -341,6 +494,8 @@ struct HipDNNGraphImpl {
   Status Execute(OrtKernelContext* kernel_ctx);
 
  private:
+  Status EnsureConstantsOnDevice();
+
   hipdnnHandle_t handle_;
 
   // hipDNN graph
@@ -359,6 +514,10 @@ struct HipDNNGraphImpl {
 
   // UID counter for tensor attributes
   int64_t next_uid_{1};
+
+  // Scalar constants that need device memory (alpha, beta)
+  std::vector<ConstantScalar> constants_;
+  void* constants_device_ptr_ = nullptr;
 };
 
 Status HipDNNGraphImpl::Build(
@@ -408,7 +567,7 @@ Status HipDNNGraphImpl::Build(
 
     // Add the node to hipDNN graph
     std::vector<TensorAttrPtr> output_attrs;
-    auto status = AddNode(*graph_, node, input_attrs, output_attrs);
+    auto status = AddNode(*graph_, node, input_attrs, output_attrs, next_uid_, constants_);
     if (status.failed()) return status;
 
     // Set UID, name on output TensorAttributes and add to symbol table
@@ -607,6 +766,32 @@ Status HipDNNGraphImpl::Compile() {
   return Status::Success();
 }
 
+Status HipDNNGraphImpl::EnsureConstantsOnDevice() {
+  if (constants_device_ptr_) {
+    return Status::Success();
+  }
+  std::vector<float> host_data;
+  host_data.reserve(constants_.size());
+  for (const auto& c : constants_) {
+    host_data.push_back(c.value);
+  }
+  size_t buf_size = host_data.size() * sizeof(float);
+  hipError_t err = hipMalloc(&constants_device_ptr_, buf_size);
+  if (err != hipSuccess) {
+    return Status::Failure("hipMalloc for constants failed: " +
+                           std::string(hipGetErrorString(err)));
+  }
+  err = hipMemcpy(constants_device_ptr_, host_data.data(), buf_size,
+                  hipMemcpyHostToDevice);
+  if (err != hipSuccess) {
+    (void)hipFree(constants_device_ptr_);
+    constants_device_ptr_ = nullptr;
+    return Status::Failure("hipMemcpy for constants failed: " +
+                           std::string(hipGetErrorString(err)));
+  }
+  return Status::Success();
+}
+
 Status HipDNNGraphImpl::Execute(OrtKernelContext* kernel_ctx) {
   try {
     Ort::KernelContext context(kernel_ctx);
@@ -636,6 +821,16 @@ Status HipDNNGraphImpl::Execute(OrtKernelContext* kernel_ctx) {
     for (size_t i = 0; i < output_uids_.size(); ++i) {
       Ort::UnownedValue output = context.GetOutput(i, output_shapes_[i]);
       variant_pack[output_uids_[i]] = output.GetTensorMutableRawData();
+    }
+
+    // Lazily allocate and copy scalar constants to device on first invocation
+    if (!constants_.empty()) {
+      auto status = EnsureConstantsOnDevice();
+      if (status.failed()) return status;
+      auto* base = static_cast<float*>(constants_device_ptr_);
+      for (size_t i = 0; i < constants_.size(); ++i) {
+        variant_pack[constants_[i].uid] = &base[i];
+      }
     }
 
     // Execute

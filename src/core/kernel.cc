@@ -58,6 +58,8 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
   }
 
   // Try hipBLAS-LT first if available
+  // TEMPORARILY DISABLED: hipBLAS-LT crashes in TensileLite with current TheRock build
+#if 0
   if (config_.useHipBlasLT()) {
     blas_graph_ = std::make_unique<BlasGraph>(ort_api_, config_.getHipBlasLtHandle());
     OrtStatus* status = blas_graph_->Build(graph_inputs, graph_outputs, nodes);
@@ -68,6 +70,7 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
     ort_api_.ReleaseStatus(status);
     blas_graph_.reset();
   }
+#endif
 
   // Standard hipDNN graph path
   if (config_.useHipDNN()) {

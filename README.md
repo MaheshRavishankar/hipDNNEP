@@ -9,12 +9,19 @@ An out-of-tree Execution Provider for ONNXRuntime that uses AMD's hipDNN library
 ### Supported Operations
 
 - **Conv2D** - via hipDNN graph API
-- **MatMul/Gemm** - via hipBLAS-LT (optional, when available)
+- **MatMul/Gemm** - via hipDNN graph API
 
 ### Optional Features
 
 - **hipBLAS-LT support** - Automatically enabled when hipblaslt is found
 - **Torch-MLIR integration** - Experimental IR-based compilation pipeline
+
+## Tested Dependency Versions
+
+| Dependency | Commit |
+|------------|--------|
+| [TheRock](https://github.com/ROCm/TheRock) | [`9639502b`](https://github.com/ROCm/TheRock/commit/9639502b523fff3faa7435894c61b1022ada9577) |
+| [IREE](https://github.com/iree-org/iree) | [`db9d11e4`](https://github.com/iree-org/iree/commit/db9d11e4c000f693e9a70f7d3100db0c5294db9e) |
 
 ## Prerequisites
 
