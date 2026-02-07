@@ -95,12 +95,11 @@ struct HipDNNGraphToExecutablePass
         output_graphs_(std::move(output_graphs)) {}
 
   ~HipDNNGraphToExecutablePass() override {
-    // Note: We intentionally do not call hipdnnDestroy here.
-    // The hipDNN backend has a bug where hipdnnDestroy crashes.
-    // When owns_handle_ is true, the handle was created for a short-lived
-    // tool (hipdnn-ep-opt), so leaking the handle is acceptable.
-    // When owns_handle_ is false, the caller owns the handle and is
-    // responsible for its lifetime.
+    // TODO: hipdnnDestroy crashes in current TheRock build.
+    // Leaking the handle is acceptable for short-lived tools like hipdnn-ep-opt.
+    // Re-enable when hipDNN fix is available.
+    (void)owns_handle_;
+    (void)handle_;
   }
 
   void runOnOperation() override;
