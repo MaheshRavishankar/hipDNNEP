@@ -56,9 +56,9 @@ int main(int argc, char* argv[]) {
     // Create session options with torch-mlir config
     Ort::SessionOptions session_options;
 
-    // Enable torch-mlir path and dump to stdout
+    // Enable torch-mlir path and dump final MLIR to stdout
     session_options.AddConfigEntry("hipdnn.use_torch_mlir", "1");
-    session_options.AddConfigEntry("hipdnn.dump_torch_mlir", "1");
+    session_options.AddConfigEntry("hipdnn.dump_lowered_module", "1");
 
     // Add HipDNN EP
     status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(

@@ -369,7 +369,9 @@ OrtStatus* ORT_API_CALL HipDNNEp::CompileImpl(
       kernel_config.setHipDNNHandle(ep->hipdnn_handle_)
           .setHipBlasLtHandle(ep->hipblaslt_handle_);
       if (ep->config_.use_torch_mlir) {
-        kernel_config.setUseTorchMlir(ep->config_.dump_torch_mlir);
+        kernel_config.setUseTorchMlir()
+            .setDumpInputModule(ep->config_.dump_input_module)
+            .setDumpLoweredModule(ep->config_.dump_lowered_module);
       }
       auto kernel = std::make_unique<Kernel>(ep->ort_api, ep->logger_, std::move(kernel_config));
       RETURN_IF_ERROR(kernel->BuildAndCompile(graph));

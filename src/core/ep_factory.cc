@@ -204,13 +204,17 @@ OrtStatus* ORT_API_CALL HipDNNEpFactory::CreateEpImpl(
   std::string use_torch_mlir;
   RETURN_IF_ERROR(GetSessionConfigEntryOrDefault(*session_options, "hipdnn.use_torch_mlir", "0", use_torch_mlir));
 
-  std::string dump_torch_mlir;
-  RETURN_IF_ERROR(GetSessionConfigEntryOrDefault(*session_options, "hipdnn.dump_torch_mlir", "0", dump_torch_mlir));
+  std::string dump_input_module;
+  RETURN_IF_ERROR(GetSessionConfigEntryOrDefault(*session_options, "hipdnn.dump_input_module", "0", dump_input_module));
+
+  std::string dump_lowered_module;
+  RETURN_IF_ERROR(GetSessionConfigEntryOrDefault(*session_options, "hipdnn.dump_lowered_module", "0", dump_lowered_module));
 
   HipDNNEp::Config config{};
   config.enable_ep_context = (ep_context_enable == "1");
   config.use_torch_mlir = (use_torch_mlir == "1");
-  config.dump_torch_mlir = (dump_torch_mlir == "1");
+  config.dump_input_module = (dump_input_module == "1");
+  config.dump_lowered_module = (dump_lowered_module == "1");
 
   auto hipdnn_ep = std::make_unique<HipDNNEp>(*factory, config, *logger);
   *ep = hipdnn_ep.release();

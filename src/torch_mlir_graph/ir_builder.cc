@@ -13,10 +13,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
-#include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
-#include "torch-mlir/Conversion/TorchOnnxToTorch/Passes.h"
-#include "torch-mlir/Dialect/Torch/IR/TorchDialect.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchTypes.h"
 #include "llvm/ADT/StringMap.h"
@@ -173,10 +170,7 @@ struct IRBuilderImpl {
   // Cache of compiled hipDNN graphs, keyed by unique name
   llvm::StringMap<std::unique_ptr<HipDNNGraph>> compiled_graphs;
 
-  IRBuilderImpl() {
-    ctx.loadDialect<mlir::torch::Torch::TorchDialect>();
-    ctx.loadDialect<mlir::func::FuncDialect>();
-  }
+  IRBuilderImpl() { loadDialects(ctx); }
 
   bool BuildModule(const std::vector<Ort::ConstValueInfo>& inputs,
                    const std::vector<Ort::ConstValueInfo>& outputs,
@@ -352,16 +346,7 @@ bool IRBuilderImpl::RunOffloadPipeline(hipdnnHandle_t handle) {
       std::make_shared<llvm::StringMap<std::unique_ptr<HipDNNGraph>>>();
 
   mlir::PassManager pm(module->getContext());
-
-  // Step 1: Convert onnx.* ops to aten.* ops
-  pm.addNestedPass<mlir::func::FuncOp>(
-      mlir::torch::onnx_c::createTorchOnnxToTorchPass());
-
-  // Step 2: Apply hipDNN offload pass
-  pm.addNestedPass<mlir::func::FuncOp>(createHipDNNOffloadPass());
-
-  // Step 3: Compile hipDNN graphs and transform to executables
-  pm.addPass(createHipDNNGraphToExecutablePass(handle, output_graphs));
+  buildOffloadPipeline(pm, handle, output_graphs);
 
   if (mlir::failed(pm.run(*module))) {
     return false;
