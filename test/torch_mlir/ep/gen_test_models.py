@@ -68,7 +68,7 @@ def gen_conv_model(output_dir):
      CHECK-SAME:      %[[W:.*]]: !torch.vtensor<[1,1,3,3],f32>)
      CHECK-SAME:     -> !torch.vtensor<[1,1,6,6],f32>
           CHECK:     %[[R:.*]] = torch.operator "hipdnn.executable"
-     CHECK-SAME:       {graph_name = "hipdnn_graph_0"}
+     CHECK-SAME:       {graph = @hipdnn_graph_0}
           CHECK:     return %[[R]] : !torch.vtensor<[1,1,6,6],f32>
           CHECK:   }
           CHECK: }

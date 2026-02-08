@@ -1,11 +1,12 @@
-// RUN: %hipdnn-ep-opt --hipdnn-graph-to-executable %s | %FileCheck %s
+// RUN: %hipdnn-ep-opt --hipdnn-graph-to-executable --split-input-file %s | %FileCheck %s --check-prefix=CHECK
 
 // Test conv2d graph conversion with single operation
 // CHECK-LABEL: func.func @conv2d_simple
 //       CHECK:   %[[RESULT:.*]] = torch.operator "hipdnn.executable"
-//  CHECK-SAME:     {graph_name = "hipdnn_graph_0"}
+//  CHECK-SAME:     {graph = @hipdnn_graph_0}
 //   CHECK-NOT:   torch.operator "hipdnn.graph"
 //       CHECK:   return %[[RESULT]]
+//       CHECK: func.func private @hipdnn_graph_0(!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>) -> !torch.vtensor<[1,16,30,30],f32>
 func.func @conv2d_simple(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.vtensor<[16,3,3,3],f32>) -> !torch.vtensor<[1,16,30,30],f32> {
   %none = torch.constant.none
   %int1 = torch.constant.int 1
@@ -23,13 +24,17 @@ func.func @conv2d_simple(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.v
   return %0 : !torch.vtensor<[1,16,30,30],f32>
 }
 
-// Test that multiple conv2d graphs get sequential names
+// -----
+
+// Test that multiple conv2d graphs get sequential module-unique names
 // CHECK-LABEL: func.func @multiple_conv2d
 //       CHECK:   %[[R0:.*]] = torch.operator "hipdnn.executable"
-//  CHECK-SAME:     {graph_name = "hipdnn_graph_0"}
+//  CHECK-SAME:     {graph = @hipdnn_graph_0}
 //       CHECK:   %[[R1:.*]] = torch.operator "hipdnn.executable"
-//  CHECK-SAME:     {graph_name = "hipdnn_graph_1"}
+//  CHECK-SAME:     {graph = @hipdnn_graph_1}
 //       CHECK:   return %[[R1]]
+//       CHECK: func.func private @hipdnn_graph_0(!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>) -> !torch.vtensor<[1,16,30,30],f32>
+//       CHECK: func.func private @hipdnn_graph_1(!torch.vtensor<[1,16,30,30],f32>, !torch.vtensor<[32,16,3,3],f32>) -> !torch.vtensor<[1,32,28,28],f32>
 func.func @multiple_conv2d(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.vtensor<[16,3,3,3],f32>, %arg2: !torch.vtensor<[32,16,3,3],f32>) -> !torch.vtensor<[1,32,28,28],f32> {
   %none = torch.constant.none
   %int1 = torch.constant.int 1

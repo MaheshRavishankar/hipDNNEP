@@ -8,7 +8,9 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Region.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchDialect.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
@@ -46,12 +48,30 @@ static std::unique_ptr<HipDNNGraph> compileHipDNNGraph(mlir::Region& region,
   return graph;
 }
 
-/// Replace a hipdnn.graph op with a hipdnn.executable op.
-/// Returns the new executable op.
-mlir::torch::Torch::OperatorOp replaceGraphWithExecutable(
-    mlir::IRRewriter& rewriter,
+/// Create a private function declaration at module scope for a compiled graph.
+/// The function signature is derived from the graphOp's operand/result types.
+/// Returns the created declaration.
+static mlir::func::FuncOp createGraphDeclaration(
+    mlir::OpBuilder& moduleBuilder,
+    mlir::ModuleOp module,
     mlir::torch::Torch::OperatorOp graphOp,
     const std::string& graph_name) {
+  auto funcType = mlir::FunctionType::get(
+      module->getContext(),
+      graphOp->getOperandTypes(),
+      graphOp->getResultTypes());
+  auto declFunc = mlir::func::FuncOp::create(
+      moduleBuilder, module->getLoc(), graph_name, funcType);
+  declFunc.setVisibility(mlir::SymbolTable::Visibility::Private);
+  return declFunc;
+}
+
+/// Replace a hipdnn.graph op with a hipdnn.executable op that references
+/// the given symbol.
+static void replaceGraphWithExecutable(
+    mlir::IRRewriter& rewriter,
+    mlir::torch::Torch::OperatorOp graphOp,
+    mlir::FlatSymbolRefAttr graphSymbol) {
   auto loc = graphOp.getLoc();
   rewriter.setInsertionPoint(graphOp);
 
@@ -60,10 +80,8 @@ mlir::torch::Torch::OperatorOp replaceGraphWithExecutable(
       rewriter.getStringAttr("hipdnn.executable"), graphOp->getOperands(),
       /*numRegions=*/0);
 
-  execOp->setAttr("graph_name", rewriter.getStringAttr(graph_name));
+  execOp->setAttr("graph", graphSymbol);
   rewriter.replaceOp(graphOp, execOp->getResults());
-
-  return execOp;
 }
 
 }  // namespace
@@ -111,45 +129,56 @@ struct HipDNNGraphToExecutablePass
 };
 
 void HipDNNGraphToExecutablePass::runOnOperation() {
-  mlir::func::FuncOp func = getOperation();
-  mlir::IRRewriter rewriter(func->getContext());
+  mlir::ModuleOp module = getOperation();
+  mlir::IRRewriter rewriter(module->getContext());
+  mlir::OpBuilder moduleBuilder(module.getBody(), module.getBody()->end());
   int graph_count = 0;
 
-  // Collect hipdnn.graph ops first (can't modify while walking)
-  llvm::SmallVector<mlir::torch::Torch::OperatorOp> graphOps;
-  func->walk([&](mlir::torch::Torch::OperatorOp torchOp) {
-    if (torchOp.getName() == "hipdnn.graph") {
-      graphOps.push_back(torchOp);
-    }
-  });
-
-  // Process each graph: compile and transform to executable only on success
-  for (auto graphOp : graphOps) {
-    std::string graph_name = "hipdnn_graph_" + std::to_string(graph_count++);
-
-    // Get the region containing the graph body
-    if (graphOp.getNumRegions() != 1) {
-      // Invalid graph structure - skip it
+  for (auto func : module.getOps<mlir::func::FuncOp>()) {
+    if (func.isDeclaration())
       continue;
+
+    // Collect hipdnn.graph ops first (can't modify while walking)
+    llvm::SmallVector<mlir::torch::Torch::OperatorOp> graphOps;
+    func->walk([&](mlir::torch::Torch::OperatorOp torchOp) {
+      if (torchOp.getName() == "hipdnn.graph") {
+        graphOps.push_back(torchOp);
+      }
+    });
+
+    // Process each graph: compile and transform to executable only on success
+    for (auto graphOp : graphOps) {
+      std::string graph_name = "hipdnn_graph_" + std::to_string(graph_count++);
+
+      // Get the region containing the graph body
+      if (graphOp.getNumRegions() != 1) {
+        // Invalid graph structure - skip it
+        continue;
+      }
+      mlir::Region& region = graphOp.getRegion(0);
+
+      // Try to compile the graph (may fail if no GPU or unsupported ops)
+      auto compiled_graph = compileHipDNNGraph(region, handle_);
+
+      if (!compiled_graph) {
+        // Compilation failed - leave the hipdnn.graph operation unchanged
+        // This allows fallback handling at runtime
+        continue;
+      }
+
+      // Compilation succeeded - store the compiled graph and transform IR
+      if (output_graphs_) {
+        (*output_graphs_)[graph_name] = std::move(compiled_graph);
+      }
+
+      // Create private function declaration at module scope
+      auto declFunc =
+          createGraphDeclaration(moduleBuilder, module, graphOp, graph_name);
+
+      // Transform hipdnn.graph -> hipdnn.executable
+      auto graphSymbol = mlir::FlatSymbolRefAttr::get(declFunc);
+      replaceGraphWithExecutable(rewriter, graphOp, graphSymbol);
     }
-    mlir::Region& region = graphOp.getRegion(0);
-
-    // Try to compile the graph (may fail if no GPU or unsupported ops)
-    auto compiled_graph = compileHipDNNGraph(region, handle_);
-
-    if (!compiled_graph) {
-      // Compilation failed - leave the hipdnn.graph operation unchanged
-      // This allows fallback handling at runtime
-      continue;
-    }
-
-    // Compilation succeeded - store the compiled graph and transform IR
-    if (output_graphs_) {
-      (*output_graphs_)[graph_name] = std::move(compiled_graph);
-    }
-
-    // Transform hipdnn.graph -> hipdnn.executable
-    replaceGraphWithExecutable(rewriter, graphOp, graph_name);
   }
 }
 

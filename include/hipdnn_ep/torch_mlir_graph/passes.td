@@ -37,27 +37,43 @@ def HipDNNOffloadPass : Pass<"hipdnn-offload", "mlir::func::FuncOp"> {
   ];
 }
 
-def HipDNNGraphToExecutablePass : Pass<"hipdnn-graph-to-executable", "mlir::func::FuncOp"> {
+def HipDNNGraphToExecutablePass : Pass<"hipdnn-graph-to-executable", "mlir::ModuleOp"> {
   let summary = "Convert hipdnn.graph operations to hipdnn.executable operations";
   let description = [{
     This pass converts `torch.operator "hipdnn.graph"` operations (which contain
     regions with torch.aten ops) to `torch.operator "hipdnn.executable"` operations
-    (which reference pre-compiled hipDNN graphs by name).
+    (which reference pre-compiled hipDNN graphs via symbol references).
 
-    This pass compiles each hipdnn.graph region using hipDNN and stores the
-    compiled graph for later execution.
+    This pass compiles each hipdnn.graph region using hipDNN, stores the compiled
+    graph for later execution, and creates a `func.func private` declaration at
+    module scope for each compiled graph. Graph names are globally unique across
+    all functions in the module.
 
     Example transformation:
     ```mlir
     // Before:
-    %0 = torch.operator "hipdnn.graph"(%input, %weight) ({
-    ^bb0(%arg0, %arg1):
-      %1 = torch.aten.convolution %arg0, %arg1, ... -> ...
-      torch.operator_terminator %1
-    }) : ...
+    func.func @main(%input: !torch.vtensor<[1,3,32,32],f32>,
+                     %weight: !torch.vtensor<[16,3,3,3],f32>)
+        -> !torch.vtensor<[1,16,30,30],f32> {
+      %0 = torch.operator "hipdnn.graph"(%input, %weight) ({
+      ^bb0(%arg0, %arg1):
+        %1 = torch.aten.convolution %arg0, %arg1, ... -> ...
+        torch.operator_terminator %1
+      }) : ...
+      return %0 : !torch.vtensor<[1,16,30,30],f32>
+    }
 
     // After:
-    %0 = torch.operator "hipdnn.executable"(%input, %weight) {graph_name = "hipdnn_graph_0"} : ...
+    func.func private @hipdnn_graph_0(
+        !torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>)
+        -> !torch.vtensor<[1,16,30,30],f32>
+    func.func @main(%input: !torch.vtensor<[1,3,32,32],f32>,
+                     %weight: !torch.vtensor<[16,3,3,3],f32>)
+        -> !torch.vtensor<[1,16,30,30],f32> {
+      %0 = torch.operator "hipdnn.executable"(%input, %weight)
+          {graph = @hipdnn_graph_0} : ...
+      return %0 : !torch.vtensor<[1,16,30,30],f32>
+    }
     ```
   }];
 
