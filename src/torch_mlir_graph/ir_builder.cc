@@ -349,8 +349,7 @@ bool IRBuilderImpl::RunOffloadPipeline(hipdnnHandle_t handle) {
   pm.addNestedPass<mlir::func::FuncOp>(createHipDNNOffloadPass());
 
   // Step 3: Compile hipDNN graphs and transform to executables
-  pm.addNestedPass<mlir::func::FuncOp>(
-      createHipDNNGraphToExecutablePass(handle, output_graphs));
+  pm.addPass(createHipDNNGraphToExecutablePass(handle, output_graphs));
 
   if (mlir::failed(pm.run(*module))) {
     return false;
