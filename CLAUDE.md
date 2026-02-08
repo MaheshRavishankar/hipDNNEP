@@ -197,13 +197,58 @@ When writing CHECK lines, follow these conventions:
 ## Torch-MLIR Integration (Experimental)
 
 The project includes optional Torch-MLIR integration for an IR-based compilation
-pipeline. When enabled (`HIPDNN_EP_ENABLE_TORCH_MLIR=ON`), the EP can:
-
-- Convert ONNX subgraphs to Torch-MLIR IR
-- Apply pattern matching for hipDNN offload
-- Use MLIR bufferization for memory planning
+pipeline. When enabled (`HIPDNN_EP_ENABLE_TORCH_MLIR=ON`), the EP converts ONNX
+subgraphs to Torch-MLIR IR, runs an offload pipeline that compiles supported ops
+into hipDNN executables (via `iree-compile`), and lowers the result to builtin
+tensor types ready for bufferization. The pipeline is defined in
+`buildOffloadPipeline` (`passes.cc`).
 
 See `docs/TorchMLIRAsIR/` for design documents and implementation plans.
+
+### Session Config Options
+
+These options are set via `OrtSessionOptions::AddConfigEntry`:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `hipdnn.use_torch_mlir` | `"0"` | Enable the Torch-MLIR compilation path |
+| `hipdnn.dump_input_module` | `"0"` | Print MLIR to stdout after building the input module (before the offload pipeline) |
+| `hipdnn.dump_lowered_module` | `"0"` | Print MLIR to stdout after running the offload pipeline |
+
+### Debugging with `hipdnn-ep-opt`
+
+The `hipdnn-ep-opt` tool (built with the MLIR preset) is an `mlir-opt`-like tool
+that registers all hipDNN passes and the `--hipdnn-offload-pipeline` named pipeline.
+This allows debugging the pipeline with standard MLIR flags.
+
+**Workflow: Inspect IR after each pass**
+
+1. Capture the input module by running with `hipdnn.dump_input_module` set to `"1"`:
+   ```cpp
+   session_options.AddConfigEntry("hipdnn.dump_input_module", "1");
+   ```
+   Save the output to a file (e.g., `input_module.mlir`).
+
+2. Run the standalone tool with IR printing flags:
+   ```bash
+   hipdnn-ep-opt \
+     --hipdnn-offload-pipeline \
+     --mlir-print-ir-after-all \
+     --mlir-print-local-scope \
+     --mlir-disable-threading \
+     input_module.mlir
+   ```
+   This prints the IR after each of the 4 pipeline passes, showing how the module
+   transforms at each step.
+
+3. To run individual passes instead of the full pipeline:
+   ```bash
+   # Just the offload pass (requires torch dialect input)
+   hipdnn-ep-opt --hipdnn-offload input_module.mlir
+
+   # Just the backend legalize pass (requires post-graph-to-executable input)
+   hipdnn-ep-opt --hipdnn-backend-legalize post_executable.mlir
+   ```
 
 ### Torch-MLIR Submodule
 

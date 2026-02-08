@@ -12,7 +12,9 @@ struct hipdnnHandle;
 typedef hipdnnHandle* hipdnnHandle_t;
 
 namespace mlir {
+class MLIRContext;
 class ModuleOp;
+class OpPassManager;
 class Pass;
 template <typename T>
 class OwningOpRef;
@@ -31,9 +33,16 @@ using CompiledGraphMap = std::shared_ptr<llvm::StringMap<std::unique_ptr<HipDNNG
 #define GEN_PASS_DECL
 #include "hipdnn_ep/torch_mlir_graph/passes.h.inc"
 
-/// Register all HipDNN EP passes with the MLIR pass registry.
-/// This is used by the hipdnn-ep-opt tool.
+/// Register all HipDNN EP passes and pipelines with the MLIR pass registry.
 void registerPasses();
+
+/// Load dialects required by the offload pipeline into the given context.
+void loadDialects(mlir::MLIRContext& ctx);
+
+/// Build the offload pipeline: onnx-to-torch, offload, graph-to-executable,
+/// backend-legalize.
+void buildOffloadPipeline(mlir::OpPassManager& pm, hipdnnHandle_t handle,
+                          CompiledGraphMap output_graphs);
 
 /// Create the HipDNNGraphToExecutablePass with a self-managed hipDNN handle.
 /// This is used by hipdnn-ep-opt for testing. Compiled graphs are discarded.

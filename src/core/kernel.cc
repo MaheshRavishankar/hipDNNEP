@@ -41,18 +41,17 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
       RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Failed to build Torch-MLIR module");
     }
 
+    if (config_.dumpInputModule()) {
+      std::cout << ir_builder_->PrintModule() << std::flush;
+    }
+
     // Run the offload pipeline and compile graphs
     if (!ir_builder_->RunOffloadPipeline(config_.getHipDNNHandle())) {
       RETURN_ERROR(ort_api_, ORT_EP_FAIL, "Failed to run hipDNN offload pipeline");
     }
 
-    // TODO: Lower and compile the MLIR module
-    if (config_.dumpTorchMlir()) {
-      // Print to stdout for lit testing
+    if (config_.dumpLoweredModule()) {
       std::cout << ir_builder_->PrintModule() << std::flush;
-    } else {
-      LOG(ort_api_, logger_, INFO, "Generated Torch-MLIR:\n"
-                                       << ir_builder_->PrintModule());
     }
     return nullptr;
   }

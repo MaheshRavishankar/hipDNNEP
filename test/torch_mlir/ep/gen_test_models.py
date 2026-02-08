@@ -16,22 +16,22 @@ import sys
 def gen_matmul_model(output_dir):
     """Generate a MatMul model: Y = A @ B
 
-    After offload pipeline, the onnx.MatMul is converted to aten.matmul
-    and outlined into a hipdnn.graph region. MatMul is supported by the
-    hipDNN backend, so compilation succeeds and the hipdnn.graph is
-    transformed to hipdnn.executable.
+    After the full offload pipeline (including backend legalization), the
+    onnx.MatMul is converted to aten.matmul, outlined into a hipdnn.graph,
+    compiled to hipdnn.executable, and finally lowered to a func.call with
+    builtin tensor types.
 
     Expected output:
     CHECK-LABEL: matmul
           CHECK: module {
           CHECK:   func.func @main
-     CHECK-SAME:     (%[[A:.*]]: !torch.vtensor<[2,3],f32>,
-     CHECK-SAME:      %[[B:.*]]: !torch.vtensor<[3,4],f32>,
-     CHECK-SAME:      %[[OUT:.*]]: !torch.vtensor<[2,4],f32> {bufferization.writable = true})
-     CHECK-SAME:     -> !torch.vtensor<[2,4],f32>
-          CHECK:     %[[R:.*]] = torch.operator "hipdnn.executable"
-     CHECK-SAME:       {graph = @hipdnn_graph_0}
-          CHECK:     return %[[R]] : !torch.vtensor<[2,4],f32>
+     CHECK-SAME:     (%[[A:.*]]: tensor<2x3xf32>,
+     CHECK-SAME:      %[[B:.*]]: tensor<3x4xf32>,
+     CHECK-SAME:      %[[OUT:.*]]: tensor<2x4xf32> {bufferization.writable = true})
+     CHECK-SAME:     -> tensor<2x4xf32>
+          CHECK:     %[[EMPTY:.*]] = tensor.empty() : tensor<2x4xf32>
+          CHECK:     %[[R:.*]] = call @hipdnn_graph_0(%[[A]], %[[B]], %[[EMPTY]])
+          CHECK:     return %[[R]] : tensor<2x4xf32>
           CHECK:   }
           CHECK: }
     """
@@ -53,21 +53,22 @@ def gen_matmul_model(output_dir):
 def gen_conv_model(output_dir):
     """Generate a Conv model
 
-    After offload pipeline, the onnx.Conv is converted to torch.aten.convolution
-    and outlined into a hipdnn.graph region. Since Conv is supported by hipDNN,
-    compilation succeeds and the hipdnn.graph is transformed to hipdnn.executable.
+    After the full offload pipeline (including backend legalization), the
+    onnx.Conv is converted to torch.aten.convolution, outlined into a
+    hipdnn.graph, compiled to hipdnn.executable, and finally lowered to a
+    func.call with builtin tensor types.
 
     Expected output:
     CHECK-LABEL: conv
           CHECK: module {
           CHECK:   func.func @main
-     CHECK-SAME:     (%[[X:.*]]: !torch.vtensor<[1,1,8,8],f32>,
-     CHECK-SAME:      %[[W:.*]]: !torch.vtensor<[1,1,3,3],f32>,
-     CHECK-SAME:      %[[OUT:.*]]: !torch.vtensor<[1,1,6,6],f32> {bufferization.writable = true})
-     CHECK-SAME:     -> !torch.vtensor<[1,1,6,6],f32>
-          CHECK:     %[[R:.*]] = torch.operator "hipdnn.executable"
-     CHECK-SAME:       {graph = @hipdnn_graph_0}
-          CHECK:     return %[[R]] : !torch.vtensor<[1,1,6,6],f32>
+     CHECK-SAME:     (%[[X:.*]]: tensor<1x1x8x8xf32>,
+     CHECK-SAME:      %[[W:.*]]: tensor<1x1x3x3xf32>,
+     CHECK-SAME:      %[[OUT:.*]]: tensor<1x1x6x6xf32> {bufferization.writable = true})
+     CHECK-SAME:     -> tensor<1x1x6x6xf32>
+          CHECK:     %[[EMPTY:.*]] = tensor.empty() : tensor<1x1x6x6xf32>
+          CHECK:     %[[R:.*]] = call @hipdnn_graph_0(%[[X]], %[[W]],
+          CHECK:     return %[[R]] : tensor<1x1x6x6xf32>
           CHECK:   }
           CHECK: }
     """

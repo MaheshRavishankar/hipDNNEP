@@ -31,19 +31,30 @@ struct KernelConfig {
   bool useHipBlasLT() const { return hipblaslt_handle_ != nullptr; }
 
   // Torch-MLIR
-  bool dumpTorchMlir() const { return dump_torch_mlir_; }
-  KernelConfig& setUseTorchMlir(bool dump = false) {
-    use_torch_mlir_ = true;
-    dump_torch_mlir_ = dump;
+  KernelConfig& setUseTorchMlir(bool value = true) {
+    use_torch_mlir_ = value;
     return *this;
   }
   bool useTorchMlir() const { return use_torch_mlir_; }
 
+  KernelConfig& setDumpInputModule(bool value = true) {
+    dump_input_module_ = value;
+    return *this;
+  }
+  bool dumpInputModule() const { return dump_input_module_; }
+
+  KernelConfig& setDumpLoweredModule(bool value = true) {
+    dump_lowered_module_ = value;
+    return *this;
+  }
+  bool dumpLoweredModule() const { return dump_lowered_module_; }
+
  private:
   hipdnnHandle_t hipdnn_handle_{nullptr};
   hipblaslt_handle_t hipblaslt_handle_{nullptr};
-  bool dump_torch_mlir_{false};
   bool use_torch_mlir_{false};
+  bool dump_input_module_{false};
+  bool dump_lowered_module_{false};
 };
 
 /// @brief Generic kernel that builds and executes hipDNN graphs or hipBLAS-LT matmuls
