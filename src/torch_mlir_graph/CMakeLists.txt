@@ -1,23 +1,28 @@
 # Copyright (c) 2026, hipDNN EP Authors. All rights reserved.
 # Licensed under the MIT License.
 
-# IRBuilder sources (stub implementations used when Torch-MLIR not available)
-target_sources(hipdnn_ep PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/ir_builder.cc
-)
+# Static library for Torch-MLIR graph (stub when Torch-MLIR not available)
+set(LIB_NAME hipdnn_ep_src_torch_mlir_graph)
+set(TORCH_MLIR_GRAPH_SOURCES ir_builder.cc)
+
+if(HIPDNN_EP_ENABLE_TORCH_MLIR)
+  list(APPEND TORCH_MLIR_GRAPH_SOURCES
+    passes.cc
+    hipdnn_offload_pass.cc
+    hipdnn_graph_to_executable_pass.cc
+  )
+endif()
+
+add_library(${LIB_NAME} STATIC ${TORCH_MLIR_GRAPH_SOURCES})
+add_library(hipdnn_ep::src::torch_mlir_graph ALIAS ${LIB_NAME})
+
+target_link_libraries(${LIB_NAME} PUBLIC hipdnn_ep::src::utils)
 
 if(NOT HIPDNN_EP_ENABLE_TORCH_MLIR)
   return()
 endif()
 
-# Static library for MLIR passes (used by both hipdnn_ep and hipdnn-ep-opt)
-add_library(hipdnn_ep_passes STATIC
-  passes.cc
-  hipdnn_offload_pass.cc
-  hipdnn_graph_to_executable_pass.cc
-)
-
-target_include_directories(hipdnn_ep_passes PUBLIC
+target_include_directories(${LIB_NAME} PUBLIC
   ${LLVM_INCLUDE_DIRS}
   ${MLIR_INCLUDE_DIRS}
   ${TORCH_MLIR_INCLUDE_DIR}
@@ -25,11 +30,11 @@ target_include_directories(hipdnn_ep_passes PUBLIC
   ${CMAKE_BINARY_DIR}/include
 )
 
-target_compile_options(hipdnn_ep_passes PRIVATE -fno-rtti)
-target_compile_definitions(hipdnn_ep_passes PUBLIC HIPDNN_EP_HAS_TORCH_MLIR)
+target_compile_options(${LIB_NAME} PRIVATE -fno-rtti)
+target_compile_definitions(${LIB_NAME} PUBLIC HIPDNN_EP_HAS_TORCH_MLIR)
 
-target_link_libraries(hipdnn_ep_passes PUBLIC
-  hipdnn_ep_graph
+target_link_libraries(${LIB_NAME} PUBLIC
+  hipdnn_ep::src::hipdnn_graph
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchOnnxToTorch.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchDialect.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchUtils.a
@@ -43,15 +48,4 @@ target_link_libraries(hipdnn_ep_passes PUBLIC
   LLVMSupport
 )
 
-add_dependencies(hipdnn_ep_passes HipDNNEpTorchMlirPassIncGen)
-
-# Add MLIR/LLVM includes and compile flags to ir_builder
-set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/ir_builder.cc
-  DIRECTORY ${CMAKE_SOURCE_DIR}
-  PROPERTIES
-    INCLUDE_DIRECTORIES "${LLVM_INCLUDE_DIRS};${MLIR_INCLUDE_DIRS};${TORCH_MLIR_INCLUDE_DIR};${CMAKE_BINARY_DIR}/include"
-    COMPILE_OPTIONS "-fno-rtti"
-)
-
-# Link passes library to hipdnn_ep
-target_link_libraries(hipdnn_ep PRIVATE hipdnn_ep_passes)
+add_dependencies(${LIB_NAME} HipDNNEpTorchMlirPassIncGen)

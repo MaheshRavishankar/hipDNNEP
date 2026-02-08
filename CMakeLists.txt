@@ -99,33 +99,26 @@ if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_c_api.h")
   message(FATAL_ERROR "ONNXRuntime headers not found at ${ONNXRUNTIME_INCLUDE_DIR}")
 endif()
 
-# Main library (sources added via subdirectories)
+# Main shared library (assembled from static libraries)
 add_library(hipdnn_ep SHARED)
+set_target_properties(hipdnn_ep PROPERTIES LINKER_LANGUAGE HIP)
 
-target_include_directories(hipdnn_ep
-  PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-  PRIVATE
-    ${ONNXRUNTIME_INCLUDE_DIR}
-)
-
-target_link_libraries(hipdnn_ep
-  PRIVATE
-    hipdnn_frontend
-    hipdnn_backend
-    hip::host
-)
-
-# Include subdirectories for modular source/config management
-# (must be after add_library since subdirectories use target_sources/target_link_libraries)
+# Include subdirectories (each creates a static library)
 add_subdirectory(include)
 add_subdirectory(src)
 add_subdirectory(tools)
 
-# Symbol visibility
-target_compile_definitions(hipdnn_ep PRIVATE HIPDNN_EP_EXPORTS)
+# Link all static libs into shared lib.
+# Core needs --whole-archive since it contains the exported entry points
+# and nothing in the shared lib directly references them.
+target_link_libraries(hipdnn_ep
+  PRIVATE
+    -Wl,--whole-archive
+    hipdnn_ep::src::core
+    -Wl,--no-whole-archive
+)
 
+# Symbol visibility
 if(UNIX AND NOT APPLE)
   target_compile_options(hipdnn_ep PRIVATE -fvisibility=hidden)
   # Export only the required symbols
@@ -137,11 +130,6 @@ endif()
 if(APPLE)
   target_compile_options(hipdnn_ep PRIVATE -fvisibility=hidden)
 endif()
-
-# Compile definitions
-target_compile_definitions(hipdnn_ep PRIVATE
-  ORT_API_MANUAL_INIT
-)
 
 # Tests
 if(HIPDNN_EP_BUILD_TESTS)
