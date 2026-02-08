@@ -10,6 +10,7 @@ if(HIPDNN_EP_ENABLE_TORCH_MLIR)
     passes.cc
     hipdnn_offload_pass.cc
     hipdnn_graph_to_executable_pass.cc
+    hipdnn_backend_legalize_pass.cc
   )
 endif()
 
@@ -38,7 +39,11 @@ target_link_libraries(${LIB_NAME} PUBLIC
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchOnnxToTorch.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchDialect.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchUtils.a
+  ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchConversionDialect.a
+  ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchConversionPasses.a
   MLIRFuncDialect
+  MLIRFuncTransforms
+  MLIRTensorDialect
   MLIRCastInterfaces
   MLIRSparseTensorDialect
   MLIRDialectUtils

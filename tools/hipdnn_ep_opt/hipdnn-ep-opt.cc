@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
@@ -18,6 +19,7 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "mlir/Transforms/Passes.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchDialect.h"
+#include "torch-mlir/Dialect/TorchConversion/IR/TorchConversionDialect.h"
 
 #include "hipdnn_ep/torch_mlir_graph/passes.h"
 
@@ -32,7 +34,9 @@ int main(int argc, char** argv) {
   // Register dialects
   mlir::DialectRegistry registry;
   registry.insert<mlir::func::FuncDialect>();
+  registry.insert<mlir::tensor::TensorDialect>();
   registry.insert<mlir::torch::Torch::TorchDialect>();
+  registry.insert<mlir::torch::TorchConversion::TorchConversionDialect>();
 
   return mlir::asMainReturnCode(
       mlir::MlirOptMain(argc, argv, "HipDNN EP MLIR optimizer driver\n", registry));
