@@ -26,7 +26,8 @@ def gen_matmul_model(output_dir):
           CHECK: module {
           CHECK:   func.func @main
      CHECK-SAME:     (%[[A:.*]]: !torch.vtensor<[2,3],f32>,
-     CHECK-SAME:      %[[B:.*]]: !torch.vtensor<[3,4],f32>)
+     CHECK-SAME:      %[[B:.*]]: !torch.vtensor<[3,4],f32>,
+     CHECK-SAME:      %[[OUT:.*]]: !torch.vtensor<[2,4],f32> {bufferization.writable = true})
      CHECK-SAME:     -> !torch.vtensor<[2,4],f32>
           CHECK:     %[[R:.*]] = torch.operator "hipdnn.graph"
      CHECK-SAME:       (%[[A]], %[[B]])
@@ -65,7 +66,8 @@ def gen_conv_model(output_dir):
           CHECK: module {
           CHECK:   func.func @main
      CHECK-SAME:     (%[[X:.*]]: !torch.vtensor<[1,1,8,8],f32>,
-     CHECK-SAME:      %[[W:.*]]: !torch.vtensor<[1,1,3,3],f32>)
+     CHECK-SAME:      %[[W:.*]]: !torch.vtensor<[1,1,3,3],f32>,
+     CHECK-SAME:      %[[OUT:.*]]: !torch.vtensor<[1,1,6,6],f32> {bufferization.writable = true})
      CHECK-SAME:     -> !torch.vtensor<[1,1,6,6],f32>
           CHECK:     %[[R:.*]] = torch.operator "hipdnn.executable"
      CHECK-SAME:       {graph = @hipdnn_graph_0}

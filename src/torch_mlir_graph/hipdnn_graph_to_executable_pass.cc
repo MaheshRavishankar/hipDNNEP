@@ -56,13 +56,24 @@ static mlir::func::FuncOp createGraphDeclaration(
     mlir::ModuleOp module,
     mlir::torch::Torch::OperatorOp graphOp,
     const std::string& graph_name) {
+  // DPS: append result types as extra input args
+  llvm::SmallVector<mlir::Type> inputTypes(graphOp->getOperandTypes());
+  size_t numOrigInputs = inputTypes.size();
+  for (auto resultType : graphOp->getResultTypes()) {
+    inputTypes.push_back(resultType);
+  }
   auto funcType = mlir::FunctionType::get(
       module->getContext(),
-      graphOp->getOperandTypes(),
+      inputTypes,
       graphOp->getResultTypes());
   auto declFunc = mlir::func::FuncOp::create(
       moduleBuilder, module->getLoc(), graph_name, funcType);
   declFunc.setVisibility(mlir::SymbolTable::Visibility::Private);
+  // Set bufferization.writable on DPS output arguments
+  for (size_t i = numOrigInputs; i < inputTypes.size(); ++i) {
+    declFunc.setArgAttr(i, "bufferization.writable",
+                        mlir::BoolAttr::get(module->getContext(), true));
+  }
   return declFunc;
 }
 

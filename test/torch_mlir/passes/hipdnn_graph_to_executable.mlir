@@ -6,7 +6,7 @@
 //  CHECK-SAME:     {graph = @hipdnn_graph_0}
 //   CHECK-NOT:   torch.operator "hipdnn.graph"
 //       CHECK:   return %[[RESULT]]
-//       CHECK: func.func private @hipdnn_graph_0(!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>) -> !torch.vtensor<[1,16,30,30],f32>
+//       CHECK: func.func private @hipdnn_graph_0(!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>, !torch.vtensor<[1,16,30,30],f32> {bufferization.writable = true}) -> !torch.vtensor<[1,16,30,30],f32>
 func.func @conv2d_simple(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.vtensor<[16,3,3,3],f32>) -> !torch.vtensor<[1,16,30,30],f32> {
   %none = torch.constant.none
   %int1 = torch.constant.int 1
@@ -33,8 +33,8 @@ func.func @conv2d_simple(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.v
 //       CHECK:   %[[R1:.*]] = torch.operator "hipdnn.executable"
 //  CHECK-SAME:     {graph = @hipdnn_graph_1}
 //       CHECK:   return %[[R1]]
-//       CHECK: func.func private @hipdnn_graph_0(!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>) -> !torch.vtensor<[1,16,30,30],f32>
-//       CHECK: func.func private @hipdnn_graph_1(!torch.vtensor<[1,16,30,30],f32>, !torch.vtensor<[32,16,3,3],f32>) -> !torch.vtensor<[1,32,28,28],f32>
+//       CHECK: func.func private @hipdnn_graph_0(!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>, !torch.vtensor<[1,16,30,30],f32> {bufferization.writable = true}) -> !torch.vtensor<[1,16,30,30],f32>
+//       CHECK: func.func private @hipdnn_graph_1(!torch.vtensor<[1,16,30,30],f32>, !torch.vtensor<[32,16,3,3],f32>, !torch.vtensor<[1,32,28,28],f32> {bufferization.writable = true}) -> !torch.vtensor<[1,32,28,28],f32>
 func.func @multiple_conv2d(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.vtensor<[16,3,3,3],f32>, %arg2: !torch.vtensor<[32,16,3,3],f32>) -> !torch.vtensor<[1,32,28,28],f32> {
   %none = torch.constant.none
   %int1 = torch.constant.int 1
