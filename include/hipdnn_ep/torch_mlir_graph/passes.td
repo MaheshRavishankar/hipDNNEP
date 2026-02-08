@@ -86,4 +86,61 @@ def HipDNNGraphToExecutablePass : Pass<"hipdnn-graph-to-executable", "mlir::Modu
   let constructor = "::hipdnn_ep::createHipDNNGraphToExecutablePass()";
 }
 
+def HipDNNBackendLegalizePass
+    : Pass<"hipdnn-backend-legalize", "mlir::ModuleOp"> {
+  let summary = "Lower torch types and hipdnn.executable ops to standard MLIR";
+  let description = [{
+    This pass converts torch dialect types to builtin MLIR types and replaces
+    `torch.operator "hipdnn.executable"` operations with `func.call` operations
+    that reference the compiled graph function declarations.
+
+    The type conversion uses torch-mlir's backend type conversion infrastructure
+    to lower `!torch.vtensor` to `tensor`, `!torch.int` to `i64`, etc.
+
+    For each `hipdnn.executable` op, the pass creates a `func.call` to the
+    corresponding graph function, inserting `tensor.empty` ops for any
+    destination-passing-style (DPS) output arguments that the graph function
+    expects but the executable op does not provide.
+
+    Example transformation:
+    ```mlir
+    // Before:
+    func.func private @hipdnn_graph_0(
+        !torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>,
+        !torch.vtensor<[1,16,30,30],f32> {bufferization.writable = true})
+        -> !torch.vtensor<[1,16,30,30],f32>
+
+    func.func @main(%arg0: !torch.vtensor<[1,3,32,32],f32>,
+                     %arg1: !torch.vtensor<[16,3,3,3],f32>)
+        -> !torch.vtensor<[1,16,30,30],f32> {
+      %0 = torch.operator "hipdnn.executable"(%arg0, %arg1)
+          {graph = @hipdnn_graph_0} : (...) -> !torch.vtensor<[1,16,30,30],f32>
+      return %0 : !torch.vtensor<[1,16,30,30],f32>
+    }
+
+    // After:
+    func.func private @hipdnn_graph_0(
+        tensor<1x3x32x32xf32>, tensor<16x3x3x3xf32>,
+        tensor<1x16x30x30xf32> {bufferization.writable = true})
+        -> tensor<1x16x30x30xf32>
+
+    func.func @main(%arg0: tensor<1x3x32x32xf32>,
+                     %arg1: tensor<16x3x3x3xf32>)
+        -> tensor<1x16x30x30xf32> {
+      %empty = tensor.empty() : tensor<1x16x30x30xf32>
+      %0 = func.call @hipdnn_graph_0(%arg0, %arg1, %empty)
+          : (...) -> tensor<1x16x30x30xf32>
+      return %0 : tensor<1x16x30x30xf32>
+    }
+    ```
+  }];
+
+  let dependentDialects = [
+    "mlir::torch::Torch::TorchDialect",
+    "mlir::torch::TorchConversion::TorchConversionDialect",
+    "mlir::func::FuncDialect",
+    "mlir::tensor::TensorDialect"
+  ];
+}
+
 #endif // HIPDNN_EP_TORCH_MLIR_GRAPH_PASSES
