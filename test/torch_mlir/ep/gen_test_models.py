@@ -17,9 +17,9 @@ def gen_matmul_model(output_dir):
     """Generate a MatMul model: Y = A @ B
 
     After offload pipeline, the onnx.MatMul is converted to aten.matmul
-    and outlined into a hipdnn.graph region. Since matmul is not yet
-    supported by the hipDNN backend, compilation fails and the hipdnn.graph
-    operation is preserved (not transformed to hipdnn.executable).
+    and outlined into a hipdnn.graph region. MatMul is supported by the
+    hipDNN backend, so compilation succeeds and the hipdnn.graph is
+    transformed to hipdnn.executable.
 
     Expected output:
     CHECK-LABEL: matmul
@@ -29,12 +29,8 @@ def gen_matmul_model(output_dir):
      CHECK-SAME:      %[[B:.*]]: !torch.vtensor<[3,4],f32>,
      CHECK-SAME:      %[[OUT:.*]]: !torch.vtensor<[2,4],f32> {bufferization.writable = true})
      CHECK-SAME:     -> !torch.vtensor<[2,4],f32>
-          CHECK:     %[[R:.*]] = torch.operator "hipdnn.graph"
-     CHECK-SAME:       (%[[A]], %[[B]])
-          CHECK:     ^bb0(%[[BA:.*]]: !torch.vtensor<[2,3],f32>,
-     CHECK-SAME:          %[[BB:.*]]: !torch.vtensor<[3,4],f32>)
-          CHECK:       %[[MM:.*]] = torch.aten.matmul %[[BA]], %[[BB]]
-          CHECK:       torch.operator_terminator %[[MM]]
+          CHECK:     %[[R:.*]] = torch.operator "hipdnn.executable"
+     CHECK-SAME:       {graph = @hipdnn_graph_0}
           CHECK:     return %[[R]] : !torch.vtensor<[2,4],f32>
           CHECK:   }
           CHECK: }

@@ -446,16 +446,138 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
   return Status::Success();
 }
 
+// Add MatMul/Gemm operation from MLIR op to hipDNN graph
+// Handles torch.aten.mm, torch.aten.matmul (simple matmul)
+// and torch.aten.addmm (Y = alpha * mat1 @ mat2 + beta * self)
+Status AddMatMulNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
+                             mlir::Operation* op,
+                             const std::vector<TensorAttrPtr>& input_attrs,
+                             TensorAttrPtr& output_attr,
+                             int64_t& next_uid,
+                             std::vector<ConstantScalar>& constants) {
+  using namespace hipdnn_frontend::graph;
+  using hipdnn_frontend::PointwiseMode;
+
+  // Determine which op we're handling and extract the A, B tensors
+  // and optional bias/alpha/beta.
+  TensorAttrPtr a_attr, b_attr;
+  TensorAttrPtr bias_attr;
+  float alpha = 1.0f;
+  float beta = 1.0f;
+
+  if (auto addmmOp = mlir::dyn_cast<mlir::torch::Torch::AtenAddmmOp>(op)) {
+    // addmm: result = alpha * mat1 @ mat2 + beta * self
+    // input_attrs: [self(bias), mat1, mat2]
+    if (input_attrs.size() < 3) {
+      return Status::Failure("addmm requires 3 tensor inputs");
+    }
+    bias_attr = input_attrs[0];
+    a_attr = input_attrs[1];
+    b_attr = input_attrs[2];
+
+    // Extract alpha and beta scalars
+    double alpha_val, beta_val;
+    if (mlir::matchPattern(addmmOp.getAlpha(),
+                           mlir::torch::Torch::m_TorchConstantFloat(&alpha_val))) {
+      alpha = static_cast<float>(alpha_val);
+    } else {
+      int64_t alpha_int;
+      if (mlir::matchPattern(addmmOp.getAlpha(),
+                             mlir::torch::Torch::m_TorchConstantInt(&alpha_int))) {
+        alpha = static_cast<float>(alpha_int);
+      }
+    }
+    if (mlir::matchPattern(addmmOp.getBeta(),
+                           mlir::torch::Torch::m_TorchConstantFloat(&beta_val))) {
+      beta = static_cast<float>(beta_val);
+    } else {
+      int64_t beta_int;
+      if (mlir::matchPattern(addmmOp.getBeta(),
+                             mlir::torch::Torch::m_TorchConstantInt(&beta_int))) {
+        beta = static_cast<float>(beta_int);
+      }
+    }
+  } else {
+    // mm / matmul: result = A @ B
+    if (input_attrs.size() < 2) {
+      return Status::Failure("mm/matmul requires 2 tensor inputs");
+    }
+    a_attr = input_attrs[0];
+    b_attr = input_attrs[1];
+  }
+
+  auto compute_dtype =
+      GetComputeDataType(a_attr->get_data_type(), b_attr->get_data_type());
+  if (!compute_dtype.has_value()) {
+    return Status::Failure(
+        "Unsupported data type combination for MatMul compute");
+  }
+
+  // matmul: result = A @ B
+  MatmulAttributes matmul_attrs;
+  matmul_attrs.set_compute_data_type(compute_dtype.value());
+  auto result = graph.matmul(a_attr, b_attr, matmul_attrs);
+
+  auto dtype = compute_dtype.value();
+  auto set_intermediate_dtype = [&](TensorAttrPtr& t) {
+    t->set_data_type(dtype);
+  };
+
+  // alpha scaling: result = alpha * (A @ B)
+  if (alpha != 1.0f) {
+    set_intermediate_dtype(result);
+    auto alpha_attr =
+        CreateScalarTensorAttr(next_uid++, dtype, alpha, constants);
+    PointwiseAttributes pw;
+    pw.set_mode(PointwiseMode::MUL).set_compute_data_type(dtype);
+    result = graph.pointwise(result, alpha_attr, pw);
+  }
+
+  // bias: result = result + beta * bias
+  if (bias_attr && beta != 0.0f) {
+    set_intermediate_dtype(result);
+    auto bias = bias_attr;
+
+    if (beta != 1.0f) {
+      auto beta_scalar =
+          CreateScalarTensorAttr(next_uid++, dtype, beta, constants);
+      PointwiseAttributes pw;
+      pw.set_mode(PointwiseMode::MUL).set_compute_data_type(dtype);
+      bias = graph.pointwise(bias, beta_scalar, pw);
+      set_intermediate_dtype(bias);
+    }
+
+    PointwiseAttributes add;
+    add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
+    result = graph.pointwise(result, bias, add);
+  }
+
+  output_attr = result;
+  return Status::Success();
+}
+
 // Dispatch MLIR op to appropriate Add*Node function
 Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
                        mlir::Operation* op,
                        const std::vector<TensorAttrPtr>& input_attrs,
-                       std::vector<TensorAttrPtr>& output_attrs) {
+                       std::vector<TensorAttrPtr>& output_attrs,
+                       int64_t& next_uid,
+                       std::vector<ConstantScalar>& constants) {
   llvm::StringRef op_name = op->getName().getStringRef();
 
   if (op_name == "torch.aten.convolution" || op_name == "torch.aten.conv2d") {
     TensorAttrPtr y_attr;
     auto status = AddConvNodeFromMLIR(graph, op, input_attrs, y_attr);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (op_name == "torch.aten.mm" || op_name == "torch.aten.matmul" ||
+      op_name == "torch.aten.addmm") {
+    TensorAttrPtr y_attr;
+    auto status = AddMatMulNodeFromMLIR(graph, op, input_attrs, y_attr,
+                                        next_uid, constants);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -684,7 +806,8 @@ Status HipDNNGraphImpl::Build(mlir::Region& region) {
     }
 
     std::vector<TensorAttrPtr> output_attrs;
-    auto status = AddNodeFromMLIR(*graph_, &op, input_attrs, output_attrs);
+    auto status = AddNodeFromMLIR(*graph_, &op, input_attrs, output_attrs,
+                                  next_uid_, constants_);
     if (status.failed()) return status;
 
     size_t tensor_result_idx = 0;
