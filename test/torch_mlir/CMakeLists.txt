@@ -22,6 +22,19 @@ add_custom_target(check-torch-mlir
   COMMENT "Running Torch-MLIR lit tests"
 )
 
-add_test(NAME torch-mlir-lit-tests
-  COMMAND ${LIT_COMMAND} ${CMAKE_CURRENT_BINARY_DIR}
+# Register each lit test file as a separate CTest entry.
+set(LIT_TESTS
+  passes/hipdnn_offload.mlir
+  passes/hipdnn_graph_to_executable.mlir
+  ep/gen_test_models.py
 )
+
+foreach(test_file ${LIT_TESTS})
+  # Strip extension and convert path separators to :: for test name
+  string(REGEX REPLACE "\\.[^.]+$" "" test_path "${test_file}")
+  string(REPLACE "/" "::" test_name "${test_path}")
+
+  add_test(NAME torch-mlir::${test_name}
+    COMMAND ${LIT_COMMAND} ${CMAKE_CURRENT_BINARY_DIR} --filter "${test_file}"
+  )
+endforeach()

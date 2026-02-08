@@ -8,7 +8,7 @@ add_executable(hipdnn-ep-opt
 target_compile_options(hipdnn-ep-opt PRIVATE -fno-rtti)
 
 target_link_libraries(hipdnn-ep-opt PRIVATE
-  hipdnn_ep_passes
+  hipdnn_ep::src::torch_mlir_graph
   MLIROptLib
   MLIRSupport
 )
