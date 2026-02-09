@@ -11,6 +11,7 @@ if(HIPDNN_EP_ENABLE_TORCH_MLIR)
     hipdnn_offload_pass.cc
     hipdnn_graph_to_executable_pass.cc
     hipdnn_backend_legalize_pass.cc
+    hipdnn_finalize_memrefs_pass.cc
   )
 endif()
 

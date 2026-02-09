@@ -89,6 +89,9 @@ void buildOffloadPipeline(mlir::OpPassManager& pm, hipdnnHandle_t handle,
   bufOpts.functionBoundaryTypeConversion =
       mlir::bufferization::LayoutMapOption::IdentityLayoutMap;
   pm.addPass(mlir::bufferization::createOneShotBufferizePass(bufOpts));
+
+  // Step 9: Promote returned memref allocs to function arguments
+  pm.addPass(createHipDNNFinalizeMemRefsPass());
 }
 
 void registerPasses() {
