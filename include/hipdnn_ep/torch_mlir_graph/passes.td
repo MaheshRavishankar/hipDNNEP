@@ -130,4 +130,19 @@ def HipDNNBackendLegalizePass
   ];
 }
 
+def HipDNNFinalizeMemRefsPass
+    : Pass<"hipdnn-finalize-memrefs", "mlir::ModuleOp"> {
+  let summary = "Promote returned memref allocs to function arguments";
+  let description = [{
+    For each func.func that returns a memref produced by memref.alloc,
+    replace the alloc with a new function argument and remove the
+    return value. This converts functions from "allocate internally and
+    return" to "caller provides the output buffer" style.
+  }];
+  let dependentDialects = [
+    "mlir::func::FuncDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
 #endif // HIPDNN_EP_TORCH_MLIR_GRAPH_PASSES

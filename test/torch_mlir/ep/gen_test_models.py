@@ -26,14 +26,12 @@ def gen_matmul_model(output_dir):
           CHECK: module {
           CHECK:   func.func @main
      CHECK-SAME:     (%[[A:.*]]: memref<2x3xf32>,
-     CHECK-SAME:      %[[B:.*]]: memref<3x4xf32>)
-     CHECK-SAME:     -> memref<2x4xf32>
-          CHECK:     %[[ALLOC:.*]] = memref.alloc()
-     CHECK-SAME:       memref<2x4xf32>
+     CHECK-SAME:      %[[B:.*]]: memref<3x4xf32>,
+     CHECK-SAME:      %[[OUT:.*]]: memref<2x4xf32>)
           CHECK:     hipdnn.execute graph("hipdnn_graph_0")
      CHECK-SAME:       ins(%[[A]], %[[B]] : memref<2x3xf32>, memref<3x4xf32>)
-     CHECK-SAME:       outs(%[[ALLOC]] : memref<2x4xf32>)
-          CHECK:     return %[[ALLOC]] : memref<2x4xf32>
+     CHECK-SAME:       outs(%[[OUT]] : memref<2x4xf32>)
+          CHECK:     return
           CHECK:   }
           CHECK: }
     """
@@ -65,14 +63,12 @@ def gen_conv_model(output_dir):
           CHECK: module {
           CHECK:   func.func @main
      CHECK-SAME:     (%[[X:.*]]: memref<1x1x8x8xf32>,
-     CHECK-SAME:      %[[W:.*]]: memref<1x1x3x3xf32>)
-     CHECK-SAME:     -> memref<1x1x6x6xf32>
-          CHECK:     %[[ALLOC:.*]] = memref.alloc()
-     CHECK-SAME:       memref<1x1x6x6xf32>
+     CHECK-SAME:      %[[W:.*]]: memref<1x1x3x3xf32>,
+     CHECK-SAME:      %[[OUT:.*]]: memref<1x1x6x6xf32>)
           CHECK:     hipdnn.execute graph("hipdnn_graph_0")
      CHECK-SAME:       ins(%[[X]], %[[W]] : memref<1x1x8x8xf32>, memref<1x1x3x3xf32>)
-     CHECK-SAME:       outs(%[[ALLOC]] : memref<1x1x6x6xf32>)
-          CHECK:     return %[[ALLOC]] : memref<1x1x6x6xf32>
+     CHECK-SAME:       outs(%[[OUT]] : memref<1x1x6x6xf32>)
+          CHECK:     return
           CHECK:   }
           CHECK: }
     """

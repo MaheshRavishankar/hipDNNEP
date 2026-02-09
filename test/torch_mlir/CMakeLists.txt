@@ -28,6 +28,8 @@ set(LIT_TESTS
   passes/hipdnn_graph_to_executable.mlir
   passes/hipdnn_backend_legalize.mlir
   passes/hipdnn_bufferize.mlir
+  passes/hipdnn_finalize_memrefs.mlir
+  passes/hipdnn_offload_pipeline.mlir
   ep/gen_test_models.py
 )
 
