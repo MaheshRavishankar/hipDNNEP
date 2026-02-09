@@ -13,8 +13,8 @@ An out-of-tree Execution Provider for ONNXRuntime that uses AMD's hipDNN library
 
 ### Optional Features
 
-- **hipBLAS-LT support** - Automatically enabled when hipblaslt is found
-- **Torch-MLIR integration** - Experimental IR-based compilation pipeline
+- **hipBLAS-LT support** - Currently disabled. When re-enabled, provides an alternative MatMul/Gemm backend via hipBLAS-LT.
+- **Torch-MLIR integration** - Experimental IR-based compilation pipeline. Enable with `HIPDNN_EP_ENABLE_TORCH_MLIR=ON`.
 
 ## Tested Dependency Versions
 
@@ -29,7 +29,7 @@ An out-of-tree Execution Provider for ONNXRuntime that uses AMD's hipDNN library
 - Ninja build system
 - HIP SDK (from TheRock)
 - hipDNN library (from TheRock)
-- hipBLAS-LT (optional, from TheRock) - enables MatMul/Gemm support
+- hipBLAS-LT (optional, from TheRock) - alternative MatMul/Gemm backend (currently disabled)
 - ONNXRuntime (source and built library)
 - iree-compile (required by hipDNN backend for code generation)
 - Python 3 with `onnx` package (for test model generation)
@@ -133,7 +133,6 @@ int main() {
     }
 
     // Create session options and append EP
-    Ort::SessionOptions session_options;
     Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
         session_options, env, &hipdnn_device, 1, nullptr, nullptr, 0);
 
@@ -161,7 +160,7 @@ This EP uses the ONNXRuntime Plugin EP V2 system, which allows:
 2. **EP** (`HipDNNEp`): Main execution provider, handles graph partitioning and compilation
 3. **Kernel** (`Kernel`): Routes to appropriate backend (hipDNN, hipBLAS-LT, or Torch-MLIR)
 4. **HipDNNGraph**: Builds hipDNN graph from ONNX nodes for Conv2D
-5. **BlasGraph**: Builds hipBLAS-LT operations for MatMul/Gemm (when available)
+5. **BlasGraph**: Builds hipBLAS-LT operations for MatMul/Gemm (currently disabled)
 6. **IRBuilder**: Torch-MLIR IR generation (experimental, when enabled)
 7. **NodeComputeInfo**: ORT callback interface for kernel lifecycle
 8. **Allocator** (`HipDeviceAllocator`): HIP device memory allocation
@@ -172,8 +171,26 @@ This EP uses the ONNXRuntime Plugin EP V2 system, which allows:
 The `Kernel` class automatically selects the appropriate backend:
 
 1. **Torch-MLIR path** (if enabled): Converts ONNX to Torch-MLIR IR for compilation
-2. **hipBLAS-LT** (if available): Used for MatMul/Gemm operations
-3. **hipDNN graph API**: Used for Conv2D and other supported operations
+2. **hipDNN graph API**: Used for Conv2D and MatMul/Gemm operations
+3. **hipBLAS-LT** (currently disabled): Alternative backend for MatMul/Gemm
+
+### Torch-MLIR Offload Pipeline
+
+When enabled, the Torch-MLIR path runs a 9-step compilation pipeline
+(`buildOffloadPipeline` in `passes.cc`):
+
+1. **onnx-to-torch** — Convert `onnx.*` ops to `torch.aten.*` ops
+2. **CSE** — Deduplicate constants and identical list constructs
+3. **offload** — Outline supported `aten` ops into `hipdnn.graph` regions
+4. **canonicalize + CSE** — Clean up dead ops, deduplicate cloned constants
+5. **graph-to-executable** — Compile `hipdnn.graph` regions via `iree-compile`, replace with `hipdnn.executable` ops
+6. **backend-legalize** — Lower torch types to builtin tensors, convert `hipdnn.executable` to DPS `hipdnn.execute`
+7. **empty-tensor-elimination** — Fold `tensor.empty` into DPS destinations
+8. **one-shot-bufferize** — Convert tensor program to memref program
+9. **finalize-memrefs** — Promote returned `memref.alloc` to function arguments (caller provides output buffers)
+
+The final output is a function with memref-typed arguments for all inputs and
+outputs, containing `hipdnn.execute` ops that reference pre-compiled graphs.
 
 ### hipDNN Integration
 
