@@ -16,7 +16,7 @@ namespace {
 
 struct ExecuteOpInterface
     : public DstBufferizableOpInterfaceExternalModel<ExecuteOpInterface,
-                                                      hipdnn_ep::hipdnn::ExecuteOp> {
+                                                     hipdnn_ep::hipdnn::ExecuteOp> {
   LogicalResult bufferize(Operation* op, RewriterBase& rewriter,
                           const BufferizationOptions& options,
                           BufferizationState& state) const {
