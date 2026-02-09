@@ -36,14 +36,20 @@ target_compile_definitions(${LIB_NAME} PUBLIC HIPDNN_EP_HAS_TORCH_MLIR)
 
 target_link_libraries(${LIB_NAME} PUBLIC
   hipdnn_ep::src::hipdnn_graph
+  hipdnn_ep::src::hipdnn_dialect
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchOnnxToTorch.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchDialect.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchUtils.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchConversionDialect.a
   ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchConversionPasses.a
+  MLIRArithTransforms
+  MLIRBufferizationDialect
+  MLIRBufferizationTransforms
   MLIRFuncDialect
   MLIRFuncTransforms
+  MLIRMemRefDialect
   MLIRTensorDialect
+  MLIRTensorTransforms
   MLIRCastInterfaces
   MLIRSparseTensorDialect
   MLIRDialectUtils

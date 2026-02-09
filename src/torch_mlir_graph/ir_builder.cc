@@ -227,22 +227,10 @@ bool IRBuilderImpl::BuildModule(
     result_types.push_back(*tensor_type);
   }
 
-  // DPS: append output types as extra function arguments
-  size_t num_inputs = arg_types.size();
-  for (auto result_type : result_types) {
-    arg_types.push_back(result_type);
-  }
-
   // Create function type and function op
   auto func_type = mlir::FunctionType::get(&ctx, arg_types, result_types);
   auto func = mlir::func::FuncOp::create(
       builder, mlir::UnknownLoc::get(&ctx), "main", func_type);
-
-  // Set bufferization.writable on DPS output arguments
-  for (size_t i = num_inputs; i < arg_types.size(); ++i) {
-    func.setArgAttr(i, "bufferization.writable",
-                    mlir::BoolAttr::get(&ctx, true));
-  }
 
   // Add ONNX opset version attribute (required by TorchOnnxToTorch pass)
   // Note: Must be a signed integer type for torch-mlir to accept it

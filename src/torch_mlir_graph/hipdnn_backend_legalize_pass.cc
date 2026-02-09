@@ -1,6 +1,7 @@
 // Copyright (c) 2026, hipDNN EP Authors. All rights reserved.
 // Licensed under the MIT License.
 
+#include "hipdnn_ep/hipdnn_dialect/HipDNNDialect.h"
 #include "hipdnn_ep/torch_mlir_graph/passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -22,15 +23,15 @@ namespace hipdnn_ep {
 namespace {
 
 //===----------------------------------------------------------------------===//
-// ConvertHipDNNExecutableToCall
+// ConvertHipDNNExecutableToExecute
 //===----------------------------------------------------------------------===//
 
-/// Convert `torch.operator "hipdnn.executable"` ops to `func.call` ops.
+/// Convert `torch.operator "hipdnn.executable"` ops to `hipdnn.execute` ops.
 ///
 /// The executable op only carries the original operands (e.g. input, weight).
-/// The target graph function also expects DPS output arguments. This pattern
-/// creates `tensor.empty` ops for those extra positions.
-struct ConvertHipDNNExecutableToCall
+/// The hipdnn.execute op follows DPS: this pattern creates `tensor.empty` ops
+/// for the init (output) operands.
+struct ConvertHipDNNExecutableToExecute
     : public mlir::OpConversionPattern<mlir::torch::Torch::OperatorOp> {
   using OpConversionPattern::OpConversionPattern;
 
@@ -40,12 +41,11 @@ struct ConvertHipDNNExecutableToCall
     if (op.getName() != "hipdnn.executable")
       return mlir::failure();
 
-    auto graphAttr = op->getAttrOfType<mlir::FlatSymbolRefAttr>("graph");
+    auto graphAttr = op->getAttrOfType<mlir::StringAttr>("graph");
     if (!graphAttr)
       return mlir::failure();
 
-    // Convert result types first — these also determine the DPS output types
-    // (createGraphDeclaration appends result types as extra input args).
+    // Convert result types first — these also determine the DPS init types.
     llvm::SmallVector<mlir::Type> resultTypes;
     for (auto type : op->getResultTypes()) {
       auto converted = getTypeConverter()->convertType(type);
@@ -54,20 +54,21 @@ struct ConvertHipDNNExecutableToCall
       resultTypes.push_back(converted);
     }
 
-    // Collect converted operands
-    llvm::SmallVector<mlir::Value> callOperands(adaptor.getOperands());
+    // Collect converted operands (inputs)
+    llvm::SmallVector<mlir::Value> inputs(adaptor.getOperands());
 
-    // Create tensor.empty for each DPS output arg.
+    // Create tensor.empty for each DPS out.
+    llvm::SmallVector<mlir::Value> outs;
     for (auto resultType : resultTypes) {
       auto tensorType = mlir::cast<mlir::RankedTensorType>(resultType);
       auto empty = mlir::tensor::EmptyOp::create(
           rewriter, op.getLoc(), tensorType.getShape(),
           tensorType.getElementType());
-      callOperands.push_back(empty);
+      outs.push_back(empty);
     }
 
-    rewriter.replaceOpWithNewOp<mlir::func::CallOp>(
-        op, graphAttr.getValue(), resultTypes, callOperands);
+    rewriter.replaceOpWithNewOp<hipdnn::ExecuteOp>(
+        op, resultTypes, graphAttr, inputs, outs);
     return mlir::success();
   }
 };
@@ -85,8 +86,8 @@ void HipDNNBackendLegalizePass::runOnOperation() {
   mlir::ModuleOp module = getOperation();
   auto* context = &getContext();
 
-  // Step 1: Full conversion — convert func signatures, call ops, return ops,
-  // and hipdnn.executable → func.call.
+  // Full conversion — convert func signatures, return ops,
+  // and hipdnn.executable → hipdnn.execute.
   {
     mlir::TypeConverter typeConverter;
     mlir::RewritePatternSet patterns(context);
@@ -103,16 +104,13 @@ void HipDNNBackendLegalizePass::runOnOperation() {
           return typeConverter.isSignatureLegal(op.getFunctionType());
         });
 
-    mlir::populateCallOpTypeConversionPattern(patterns, typeConverter);
-    target.addDynamicallyLegalOp<mlir::func::CallOp>(
-        [&](mlir::func::CallOp op) { return typeConverter.isLegal(op); });
-
     mlir::populateReturnOpTypeConversionPattern(patterns, typeConverter);
     target.addLegalOp<mlir::ModuleOp>();
     target.addLegalOp<mlir::tensor::EmptyOp>();
+    target.addLegalOp<hipdnn::ExecuteOp>();
 
-    // Custom pattern for hipdnn.executable → func.call
-    patterns.add<ConvertHipDNNExecutableToCall>(typeConverter, context);
+    // Custom pattern for hipdnn.executable → hipdnn.execute
+    patterns.add<ConvertHipDNNExecutableToExecute>(typeConverter, context);
 
     // hipdnn.executable ops must be converted; other torch.operator ops are OK.
     target.addDynamicallyLegalOp<mlir::torch::Torch::OperatorOp>(
