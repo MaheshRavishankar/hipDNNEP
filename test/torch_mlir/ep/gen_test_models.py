@@ -16,22 +16,24 @@ import sys
 def gen_matmul_model(output_dir):
     """Generate a MatMul model: Y = A @ B
 
-    After the full offload pipeline (including backend legalization), the
+    After the full offload pipeline (including bufferization), the
     onnx.MatMul is converted to aten.matmul, outlined into a hipdnn.graph,
-    compiled to hipdnn.executable, and finally lowered to a func.call with
-    builtin tensor types.
+    compiled to hipdnn.executable, lowered to hipdnn.execute (DPS), and
+    bufferized to memref types.
 
     Expected output:
     CHECK-LABEL: matmul
           CHECK: module {
           CHECK:   func.func @main
-     CHECK-SAME:     (%[[A:.*]]: tensor<2x3xf32>,
-     CHECK-SAME:      %[[B:.*]]: tensor<3x4xf32>,
-     CHECK-SAME:      %[[OUT:.*]]: tensor<2x4xf32> {bufferization.writable = true})
-     CHECK-SAME:     -> tensor<2x4xf32>
-          CHECK:     %[[EMPTY:.*]] = tensor.empty() : tensor<2x4xf32>
-          CHECK:     %[[R:.*]] = call @hipdnn_graph_0(%[[A]], %[[B]], %[[EMPTY]])
-          CHECK:     return %[[R]] : tensor<2x4xf32>
+     CHECK-SAME:     (%[[A:.*]]: memref<2x3xf32>,
+     CHECK-SAME:      %[[B:.*]]: memref<3x4xf32>)
+     CHECK-SAME:     -> memref<2x4xf32>
+          CHECK:     %[[ALLOC:.*]] = memref.alloc()
+     CHECK-SAME:       memref<2x4xf32>
+          CHECK:     hipdnn.execute graph("hipdnn_graph_0")
+     CHECK-SAME:       ins(%[[A]], %[[B]] : memref<2x3xf32>, memref<3x4xf32>)
+     CHECK-SAME:       outs(%[[ALLOC]] : memref<2x4xf32>)
+          CHECK:     return %[[ALLOC]] : memref<2x4xf32>
           CHECK:   }
           CHECK: }
     """
@@ -53,22 +55,24 @@ def gen_matmul_model(output_dir):
 def gen_conv_model(output_dir):
     """Generate a Conv model
 
-    After the full offload pipeline (including backend legalization), the
+    After the full offload pipeline (including bufferization), the
     onnx.Conv is converted to torch.aten.convolution, outlined into a
-    hipdnn.graph, compiled to hipdnn.executable, and finally lowered to a
-    func.call with builtin tensor types.
+    hipdnn.graph, compiled to hipdnn.executable, lowered to hipdnn.execute
+    (DPS), and bufferized to memref types.
 
     Expected output:
     CHECK-LABEL: conv
           CHECK: module {
           CHECK:   func.func @main
-     CHECK-SAME:     (%[[X:.*]]: tensor<1x1x8x8xf32>,
-     CHECK-SAME:      %[[W:.*]]: tensor<1x1x3x3xf32>,
-     CHECK-SAME:      %[[OUT:.*]]: tensor<1x1x6x6xf32> {bufferization.writable = true})
-     CHECK-SAME:     -> tensor<1x1x6x6xf32>
-          CHECK:     %[[EMPTY:.*]] = tensor.empty() : tensor<1x1x6x6xf32>
-          CHECK:     %[[R:.*]] = call @hipdnn_graph_0(%[[X]], %[[W]],
-          CHECK:     return %[[R]] : tensor<1x1x6x6xf32>
+     CHECK-SAME:     (%[[X:.*]]: memref<1x1x8x8xf32>,
+     CHECK-SAME:      %[[W:.*]]: memref<1x1x3x3xf32>)
+     CHECK-SAME:     -> memref<1x1x6x6xf32>
+          CHECK:     %[[ALLOC:.*]] = memref.alloc()
+     CHECK-SAME:       memref<1x1x6x6xf32>
+          CHECK:     hipdnn.execute graph("hipdnn_graph_0")
+     CHECK-SAME:       ins(%[[X]], %[[W]] : memref<1x1x8x8xf32>, memref<1x1x3x3xf32>)
+     CHECK-SAME:       outs(%[[ALLOC]] : memref<1x1x6x6xf32>)
+          CHECK:     return %[[ALLOC]] : memref<1x1x6x6xf32>
           CHECK:   }
           CHECK: }
     """

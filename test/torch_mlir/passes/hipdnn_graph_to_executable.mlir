@@ -3,10 +3,9 @@
 // Test conv2d graph conversion with single operation
 // CHECK-LABEL: func.func @conv2d_simple
 //       CHECK:   %[[RESULT:.*]] = torch.operator "hipdnn.executable"
-//  CHECK-SAME:     {graph = @hipdnn_graph_0}
+//  CHECK-SAME:     {graph = "hipdnn_graph_0"}
 //   CHECK-NOT:   torch.operator "hipdnn.graph"
 //       CHECK:   return %[[RESULT]]
-//       CHECK: func.func private @hipdnn_graph_0(!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>, !torch.vtensor<[1,16,30,30],f32> {bufferization.writable = true}) -> !torch.vtensor<[1,16,30,30],f32>
 func.func @conv2d_simple(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.vtensor<[16,3,3,3],f32>) -> !torch.vtensor<[1,16,30,30],f32> {
   %0 = torch.operator "hipdnn.graph"(%arg0, %arg1) : (!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>) -> !torch.vtensor<[1,16,30,30],f32> {
   ^bb0(%input: !torch.vtensor<[1,3,32,32],f32>, %weight: !torch.vtensor<[16,3,3,3],f32>):
@@ -29,12 +28,10 @@ func.func @conv2d_simple(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.v
 // Test that multiple conv2d graphs get sequential module-unique names
 // CHECK-LABEL: func.func @multiple_conv2d
 //       CHECK:   %[[R0:.*]] = torch.operator "hipdnn.executable"
-//  CHECK-SAME:     {graph = @hipdnn_graph_0}
+//  CHECK-SAME:     {graph = "hipdnn_graph_0"}
 //       CHECK:   %[[R1:.*]] = torch.operator "hipdnn.executable"
-//  CHECK-SAME:     {graph = @hipdnn_graph_1}
+//  CHECK-SAME:     {graph = "hipdnn_graph_1"}
 //       CHECK:   return %[[R1]]
-//       CHECK: func.func private @hipdnn_graph_0(!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>, !torch.vtensor<[1,16,30,30],f32> {bufferization.writable = true}) -> !torch.vtensor<[1,16,30,30],f32>
-//       CHECK: func.func private @hipdnn_graph_1(!torch.vtensor<[1,16,30,30],f32>, !torch.vtensor<[32,16,3,3],f32>, !torch.vtensor<[1,32,28,28],f32> {bufferization.writable = true}) -> !torch.vtensor<[1,32,28,28],f32>
 func.func @multiple_conv2d(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.vtensor<[16,3,3,3],f32>, %arg2: !torch.vtensor<[32,16,3,3],f32>) -> !torch.vtensor<[1,32,28,28],f32> {
   // First conv: 3->16 channels
   %0 = torch.operator "hipdnn.graph"(%arg0, %arg1) : (!torch.vtensor<[1,3,32,32],f32>, !torch.vtensor<[16,3,3,3],f32>) -> !torch.vtensor<[1,16,30,30],f32> {
@@ -72,13 +69,9 @@ func.func @multiple_conv2d(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch
 // Test addmm with default alpha=1, beta=1
 // CHECK-LABEL: func.func @addmm_default
 //       CHECK:   %[[RESULT:.*]] = torch.operator "hipdnn.executable"
-//  CHECK-SAME:     {graph = @hipdnn_graph_0}
+//  CHECK-SAME:     {graph = "hipdnn_graph_0"}
 //   CHECK-NOT:   torch.operator "hipdnn.graph"
 //       CHECK:   return %[[RESULT]]
-//       CHECK: func.func private @hipdnn_graph_0(
-//  CHECK-SAME:   !torch.vtensor<[4],f32>, !torch.vtensor<[3,4],f32>, !torch.vtensor<[4,4],f32>,
-//  CHECK-SAME:   !torch.vtensor<[3,4],f32> {bufferization.writable = true})
-//  CHECK-SAME:   -> !torch.vtensor<[3,4],f32>
 func.func @addmm_default(%arg0: !torch.vtensor<[4],f32>, %arg1: !torch.vtensor<[3,4],f32>, %arg2: !torch.vtensor<[4,4],f32>) -> !torch.vtensor<[3,4],f32> {
   %0 = torch.operator "hipdnn.graph"(%arg0, %arg1, %arg2) : (!torch.vtensor<[4],f32>, !torch.vtensor<[3,4],f32>, !torch.vtensor<[4,4],f32>) -> !torch.vtensor<[3,4],f32> {
   ^bb0(%bias: !torch.vtensor<[4],f32>, %mat1: !torch.vtensor<[3,4],f32>, %mat2: !torch.vtensor<[4,4],f32>):
@@ -94,13 +87,9 @@ func.func @addmm_default(%arg0: !torch.vtensor<[4],f32>, %arg1: !torch.vtensor<[
 // Test addmm with non-default alpha and beta values
 // CHECK-LABEL: func.func @addmm_alpha_beta
 //       CHECK:   %[[RESULT:.*]] = torch.operator "hipdnn.executable"
-//  CHECK-SAME:     {graph = @hipdnn_graph_0}
+//  CHECK-SAME:     {graph = "hipdnn_graph_0"}
 //   CHECK-NOT:   torch.operator "hipdnn.graph"
 //       CHECK:   return %[[RESULT]]
-//       CHECK: func.func private @hipdnn_graph_0(
-//  CHECK-SAME:   !torch.vtensor<[4],f32>, !torch.vtensor<[3,4],f32>, !torch.vtensor<[4,4],f32>,
-//  CHECK-SAME:   !torch.vtensor<[3,4],f32> {bufferization.writable = true})
-//  CHECK-SAME:   -> !torch.vtensor<[3,4],f32>
 func.func @addmm_alpha_beta(%arg0: !torch.vtensor<[4],f32>, %arg1: !torch.vtensor<[3,4],f32>, %arg2: !torch.vtensor<[4,4],f32>) -> !torch.vtensor<[3,4],f32> {
   %0 = torch.operator "hipdnn.graph"(%arg0, %arg1, %arg2) : (!torch.vtensor<[4],f32>, !torch.vtensor<[3,4],f32>, !torch.vtensor<[4,4],f32>) -> !torch.vtensor<[3,4],f32> {
   ^bb0(%bias: !torch.vtensor<[4],f32>, %mat1: !torch.vtensor<[3,4],f32>, %mat2: !torch.vtensor<[4,4],f32>):
@@ -117,13 +106,9 @@ func.func @addmm_alpha_beta(%arg0: !torch.vtensor<[4],f32>, %arg1: !torch.vtenso
 // Test matmul graph conversion
 // CHECK-LABEL: func.func @matmul_simple
 //       CHECK:   %[[RESULT:.*]] = torch.operator "hipdnn.executable"
-//  CHECK-SAME:     {graph = @hipdnn_graph_0}
+//  CHECK-SAME:     {graph = "hipdnn_graph_0"}
 //   CHECK-NOT:   torch.operator "hipdnn.graph"
 //       CHECK:   return %[[RESULT]]
-//       CHECK: func.func private @hipdnn_graph_0(
-//  CHECK-SAME:   !torch.vtensor<[2,3],f32>, !torch.vtensor<[3,4],f32>,
-//  CHECK-SAME:   !torch.vtensor<[2,4],f32> {bufferization.writable = true})
-//  CHECK-SAME:   -> !torch.vtensor<[2,4],f32>
 func.func @matmul_simple(%arg0: !torch.vtensor<[2,3],f32>, %arg1: !torch.vtensor<[3,4],f32>) -> !torch.vtensor<[2,4],f32> {
   %0 = torch.operator "hipdnn.graph"(%arg0, %arg1) : (!torch.vtensor<[2,3],f32>, !torch.vtensor<[3,4],f32>) -> !torch.vtensor<[2,4],f32> {
   ^bb0(%a: !torch.vtensor<[2,3],f32>, %b: !torch.vtensor<[3,4],f32>):

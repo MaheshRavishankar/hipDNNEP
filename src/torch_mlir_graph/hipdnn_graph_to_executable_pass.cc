@@ -10,7 +10,6 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Region.h"
-#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/Pass.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchDialect.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
@@ -48,41 +47,12 @@ static std::unique_ptr<HipDNNGraph> compileHipDNNGraph(mlir::Region& region,
   return graph;
 }
 
-/// Create a private function declaration at module scope for a compiled graph.
-/// The function signature is derived from the graphOp's operand/result types.
-/// Returns the created declaration.
-static mlir::func::FuncOp createGraphDeclaration(
-    mlir::OpBuilder& moduleBuilder,
-    mlir::ModuleOp module,
-    mlir::torch::Torch::OperatorOp graphOp,
-    const std::string& graph_name) {
-  // DPS: append result types as extra input args
-  llvm::SmallVector<mlir::Type> inputTypes(graphOp->getOperandTypes());
-  size_t numOrigInputs = inputTypes.size();
-  for (auto resultType : graphOp->getResultTypes()) {
-    inputTypes.push_back(resultType);
-  }
-  auto funcType = mlir::FunctionType::get(
-      module->getContext(),
-      inputTypes,
-      graphOp->getResultTypes());
-  auto declFunc = mlir::func::FuncOp::create(
-      moduleBuilder, module->getLoc(), graph_name, funcType);
-  declFunc.setVisibility(mlir::SymbolTable::Visibility::Private);
-  // Set bufferization.writable on DPS output arguments
-  for (size_t i = numOrigInputs; i < inputTypes.size(); ++i) {
-    declFunc.setArgAttr(i, "bufferization.writable",
-                        mlir::BoolAttr::get(module->getContext(), true));
-  }
-  return declFunc;
-}
-
 /// Replace a hipdnn.graph op with a hipdnn.executable op that references
-/// the given symbol.
+/// the compiled graph by name (StringAttr).
 static void replaceGraphWithExecutable(
     mlir::IRRewriter& rewriter,
     mlir::torch::Torch::OperatorOp graphOp,
-    mlir::FlatSymbolRefAttr graphSymbol) {
+    const std::string& graph_name) {
   auto loc = graphOp.getLoc();
   rewriter.setInsertionPoint(graphOp);
 
@@ -91,7 +61,7 @@ static void replaceGraphWithExecutable(
       rewriter.getStringAttr("hipdnn.executable"), graphOp->getOperands(),
       /*numRegions=*/0);
 
-  execOp->setAttr("graph", graphSymbol);
+  execOp->setAttr("graph", rewriter.getStringAttr(graph_name));
   rewriter.replaceOp(graphOp, execOp->getResults());
 }
 
@@ -142,7 +112,6 @@ struct HipDNNGraphToExecutablePass
 void HipDNNGraphToExecutablePass::runOnOperation() {
   mlir::ModuleOp module = getOperation();
   mlir::IRRewriter rewriter(module->getContext());
-  mlir::OpBuilder moduleBuilder(module.getBody(), module.getBody()->end());
   int graph_count = 0;
 
   for (auto func : module.getOps<mlir::func::FuncOp>()) {
@@ -182,13 +151,8 @@ void HipDNNGraphToExecutablePass::runOnOperation() {
         (*output_graphs_)[graph_name] = std::move(compiled_graph);
       }
 
-      // Create private function declaration at module scope
-      auto declFunc =
-          createGraphDeclaration(moduleBuilder, module, graphOp, graph_name);
-
       // Transform hipdnn.graph -> hipdnn.executable
-      auto graphSymbol = mlir::FlatSymbolRefAttr::get(declFunc);
-      replaceGraphWithExecutable(rewriter, graphOp, graphSymbol);
+      replaceGraphWithExecutable(rewriter, graphOp, graph_name);
     }
   }
 }
