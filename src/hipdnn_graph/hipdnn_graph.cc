@@ -283,6 +283,52 @@ Status AddMatMulNode(
   return Status::Success();
 }
 
+// Map ONNX binary op type to hipDNN PointwiseMode
+static std::optional<hipdnn_frontend::PointwiseMode> ToPointwiseMode(
+    const std::string& op_type) {
+  using hipdnn_frontend::PointwiseMode;
+  if (op_type == "Mul") return PointwiseMode::MUL;
+  if (op_type == "Add") return PointwiseMode::ADD;
+  if (op_type == "Sub") return PointwiseMode::SUB;
+  if (op_type == "Div") return PointwiseMode::DIV;
+  return std::nullopt;
+}
+
+// Add a binary pointwise operation (Mul, Sub, Add, Div) to hipDNN graph
+// Takes two input tensor attributes, returns one output tensor attribute
+static Status AddBinaryPointwiseNode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    TensorAttrPtr& output_attr) {
+  using namespace hipdnn_frontend::graph;
+
+  std::string op_type = node.GetOperatorType();
+
+  if (input_attrs.size() != 2) {
+    return Status::Failure(op_type + " requires exactly 2 input tensor attributes");
+  }
+
+  auto mode = ToPointwiseMode(op_type);
+  if (!mode.has_value()) {
+    return Status::Failure("Unsupported pointwise op type: " + op_type);
+  }
+
+  const auto& a_attr = input_attrs[0];
+  const auto& b_attr = input_attrs[1];
+
+  auto compute_dtype = GetComputeDataType(a_attr->get_data_type(), b_attr->get_data_type());
+  if (!compute_dtype.has_value()) {
+    return Status::Failure("Unsupported data type combination for " + op_type);
+  }
+
+  PointwiseAttributes pw;
+  pw.set_mode(mode.value()).set_compute_data_type(compute_dtype.value());
+  output_attr = graph.pointwise(a_attr, b_attr, pw);
+
+  return Status::Success();
+}
+
 // Dispatch to appropriate Add*Node based on op_type
 // Takes input tensor attributes, returns output tensor attributes
 Status AddNode(
@@ -306,6 +352,14 @@ Status AddNode(
     TensorAttrPtr y_attr;
     auto status = AddMatMulNode(
         graph, node, input_attrs, y_attr, next_uid, constants);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (ToPointwiseMode(op_type).has_value()) {
+    TensorAttrPtr y_attr;
+    auto status = AddBinaryPointwiseNode(graph, node, input_attrs, y_attr);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();

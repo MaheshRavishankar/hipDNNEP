@@ -5,6 +5,7 @@
 
 #include "hipdnn_ep/blas_graph/blas_graph.h"
 #include "hipdnn_ep/hipdnn_graph/hipdnn_graph.h"
+#include "hipdnn_ep/pointwise_graph/pointwise_graph.h"
 #include "hipdnn_ep/torch_mlir_graph/ir_builder.h"
 
 #include <memory>
@@ -73,11 +74,14 @@ struct Kernel {
   const OrtLogger& logger_;
   KernelConfig config_;
 
-  // hipDNN graph (nullptr when using blas_graph_)
+  // hipDNN graph (nullptr when using blas_graph_ or pointwise_graph_)
   std::unique_ptr<HipDNNGraph> hipdnn_graph_;
 
   // hipBLAS-LT support (nullptr if unavailable or not used)
   std::unique_ptr<BlasGraph> blas_graph_;
+
+  // Pointwise via HIP kernels (nullptr if not a pointwise graph)
+  std::unique_ptr<PointwiseGraph> pointwise_graph_;
 
   // Torch-MLIR support
   std::unique_ptr<IRBuilder> ir_builder_;

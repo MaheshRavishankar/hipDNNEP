@@ -71,6 +71,21 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
   }
 #endif
 
+  // Try pointwise graph (standalone binary pointwise via HIP kernels).
+  // This must be attempted before hipDNN graph because hipDNN's graph API
+  // does not support standalone pointwise operations (they require a compute
+  // op like convolution or matmul as the primary node).
+  {
+    pointwise_graph_ = std::make_unique<PointwiseGraph>();
+    Status build_status =
+        pointwise_graph_->Build(graph_inputs, graph_outputs, nodes);
+    if (build_status.ok()) {
+      return HIPDNN_STATUS_TO_ORT(ort_api_, pointwise_graph_->Compile());
+    }
+    // Not a pointwise graph, fall through to hipDNN
+    pointwise_graph_.reset();
+  }
+
   // Standard hipDNN graph path
   if (config_.useHipDNN()) {
     hipdnn_graph_ = std::make_unique<HipDNNGraph>(config_.getHipDNNHandle());
@@ -87,6 +102,9 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
 OrtStatus* Kernel::Execute(OrtKernelContext* kernel_ctx) {
   if (blas_graph_) {
     return blas_graph_->Execute(kernel_ctx);
+  }
+  if (pointwise_graph_) {
+    return HIPDNN_STATUS_TO_ORT(ort_api_, pointwise_graph_->Execute(kernel_ctx));
   }
   if (hipdnn_graph_) {
     return HIPDNN_STATUS_TO_ORT(ort_api_, hipdnn_graph_->Execute(kernel_ctx));

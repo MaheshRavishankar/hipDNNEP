@@ -30,5 +30,6 @@ target_link_libraries(${LIB_NAME} PUBLIC
   hipdnn_ep::src::utils
   hipdnn_ep::src::hipdnn_graph
   hipdnn_ep::src::blas_graph
+  hipdnn_ep::src::pointwise_graph
   hipdnn_ep::src::torch_mlir_graph
 )
