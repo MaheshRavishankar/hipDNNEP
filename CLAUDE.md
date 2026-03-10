@@ -25,9 +25,7 @@ cmake --preset RelWithDebInfo
 # Build
 cmake --build --preset RelWithDebInfo
 
-# Test (use -local preset if available, see "Local Presets" section)
-ctest --preset RelWithDebInfo-local
-# Or without local preset (requires iree-compile in PATH):
+# Test
 ctest --preset RelWithDebInfo
 ```
 
@@ -67,8 +65,8 @@ cmake --preset RelWithDebInfo-MLIR
 # Build
 cmake --build --preset RelWithDebInfo-MLIR
 
-# Test (use -local preset if available)
-ctest --preset RelWithDebInfo-MLIR-local
+# Test
+ctest --preset RelWithDebInfo-MLIR
 ```
 
 ## Environment Setup
@@ -77,40 +75,6 @@ Before building, ensure these environment variables are set:
 ```bash
 export THEROCK_DIST="/path/to/TheRock/build/dist/rocm"
 export ONNXRUNTIME_ROOT="/path/to/onnxruntime"
-```
-
-### Local Presets (Recommended)
-
-The hipDNN backend requires `iree-compile` in PATH for code generation. The recommended
-approach is to create a `CMakeUserPresets.json` file with local test presets that set
-the correct environment. This file is git-ignored and won't affect other developers.
-
-Example `CMakeUserPresets.json`:
-```json
-{
-  "version": 4,
-  "testPresets": [
-    {
-      "name": "RelWithDebInfo-local",
-      "inherits": "RelWithDebInfo",
-      "environment": {
-        "PATH": "/path/to/iree/build/tools:$penv{PATH}"
-      }
-    },
-    {
-      "name": "RelWithDebInfo-MLIR-local",
-      "inherits": "RelWithDebInfo-MLIR",
-      "environment": {
-        "PATH": "/path/to/iree/build/tools:$penv{PATH}"
-      }
-    }
-  ]
-}
-```
-
-If local presets are not available, manually add iree-compile to PATH before running tests:
-```bash
-export PATH="/path/to/iree/build/tools:$PATH"
 ```
 
 ## Git Workflow
@@ -138,22 +102,13 @@ export PATH="/path/to/iree/build/tools:$PATH"
 
 ## Testing
 
-Tests use Google Test framework. **Important**: Use local presets (`-local` suffix) if
-available, as they set up the correct PATH for `iree-compile`.
+Tests use Google Test framework.
 
 ```bash
-# Preferred: use local preset
-ctest --preset RelWithDebInfo-local --output-on-failure
+ctest --preset RelWithDebInfo --output-on-failure
 
 # Or with MLIR build
-ctest --preset RelWithDebInfo-MLIR-local --output-on-failure
-```
-
-If local presets are not available:
-```bash
-# Ensure iree-compile is in PATH first
-export PATH="/path/to/iree/build/tools:$PATH"
-ctest --preset RelWithDebInfo --output-on-failure
+ctest --preset RelWithDebInfo-MLIR --output-on-failure
 ```
 
 ### Lit Tests (Torch-MLIR)
@@ -191,7 +146,6 @@ When writing CHECK lines, follow these conventions:
 - Conv2D via hipDNN graph API
 - MatMul/Gemm via hipBLAS-LT (when available)
 - Plugin EP v2 API for dynamic loading
-- Requires `iree-compile` in PATH for hipDNN backend code generation (use local presets)
 - Python tests require `onnx` package (install in `.venv` or system Python)
 
 ## Torch-MLIR Integration (Experimental)
@@ -199,7 +153,7 @@ When writing CHECK lines, follow these conventions:
 The project includes optional Torch-MLIR integration for an IR-based compilation
 pipeline. When enabled (`HIPDNN_EP_ENABLE_TORCH_MLIR=ON`), the EP converts ONNX
 subgraphs to Torch-MLIR IR, runs an offload pipeline that compiles supported ops
-into hipDNN executables (via `iree-compile`), and lowers the result to builtin
+into hipDNN executables (via the hipDNN/Fusilli backend), and lowers the result to builtin
 tensor types ready for bufferization. The pipeline is defined in
 `buildOffloadPipeline` (`passes.cc`).
 
