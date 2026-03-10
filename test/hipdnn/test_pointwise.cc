@@ -5,8 +5,6 @@
 
 #include <cmath>
 #include <fstream>
-#include <functional>
-#include <numeric>
 #include <vector>
 
 #include "hipdnn_ep/core/ort_api.h"

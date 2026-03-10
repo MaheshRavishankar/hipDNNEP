@@ -455,7 +455,9 @@ Status AddMatMulNode(
   return Status::Success();
 }
 
-// Map ONNX pointwise op name to hipDNN PointwiseMode
+// Map ONNX pointwise op name to hipDNN PointwiseMode.
+// Keep this list in sync with the pointwise dispatch in
+// src/core/ep.cc (IsSupportedOp).
 static std::optional<hipdnn_frontend::PointwiseMode> GetPointwiseMode(
     const std::string& op_type) {
   using hipdnn_frontend::PointwiseMode;

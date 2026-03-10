@@ -320,6 +320,8 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
     }
   }
 
+  // Pointwise binary ops.  Keep this list in sync with GetPointwiseMode()
+  // in src/hipdnn_graph/hipdnn_graph.cc.
   if (op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
       op_type == "Div") {
     return IsSupportedPointwise(node);
