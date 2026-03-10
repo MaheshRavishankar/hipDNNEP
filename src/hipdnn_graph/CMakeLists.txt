@@ -38,7 +38,12 @@ if(HIPDNN_EP_ENABLE_TORCH_MLIR)
     ${TORCH_MLIR_INCLUDE_DIR}
     ${CMAKE_BINARY_DIR}/include
   )
+  # hipDNN frontend headers require RTTI (dynamic_cast, typeid in
+  # EngineOverrideUtils.hpp and KnobWrapper.hpp), but MLIR libraries are
+  # compiled without RTTI. Use -fno-rtti on the target but override it
+  # for hipdnn_graph.cc which includes the frontend headers.
   target_compile_options(${LIB_NAME} PRIVATE -fno-rtti)
+  set_source_files_properties(hipdnn_graph.cc PROPERTIES COMPILE_OPTIONS -frtti)
   target_compile_definitions(${LIB_NAME} PUBLIC HIPDNN_EP_HAS_TORCH_MLIR)
   target_link_libraries(${LIB_NAME} PUBLIC
     ${TORCH_MLIR_LIB_DIR}/libTorchMLIRTorchDialect.a

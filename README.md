@@ -20,8 +20,7 @@ An out-of-tree Execution Provider for ONNXRuntime that uses AMD's hipDNN library
 
 | Dependency | Commit |
 |------------|--------|
-| [TheRock](https://github.com/ROCm/TheRock) | [`9639502b`](https://github.com/ROCm/TheRock/commit/9639502b523fff3faa7435894c61b1022ada9577) |
-| [IREE](https://github.com/iree-org/iree) | [`db9d11e4`](https://github.com/iree-org/iree/commit/db9d11e4c000f693e9a70f7d3100db0c5294db9e) |
+| [TheRock](https://github.com/ROCm/TheRock) | [`af5cb3a1`](https://github.com/ROCm/TheRock/commit/af5cb3a1c89a0c5b13394b16cb55d9ccafcdce22) |
 
 ## Prerequisites
 
@@ -31,7 +30,6 @@ An out-of-tree Execution Provider for ONNXRuntime that uses AMD's hipDNN library
 - hipDNN library (from TheRock)
 - hipBLAS-LT (optional, from TheRock) - alternative MatMul/Gemm backend (currently disabled)
 - ONNXRuntime (source and built library)
-- iree-compile (required by hipDNN backend for code generation)
 - Python 3 with `onnx` package (for test model generation)
 
 ## Building
@@ -57,33 +55,7 @@ cmake --build --preset RelWithDebInfo
 
 ### 3. Run Tests
 
-Tests require `iree-compile` in PATH. The recommended approach is to create local
-test presets in `CMakeUserPresets.json` (git-ignored) that set up the environment.
-
-Example `CMakeUserPresets.json`:
-```json
-{
-  "version": 4,
-  "testPresets": [
-    {
-      "name": "RelWithDebInfo-local",
-      "inherits": "RelWithDebInfo",
-      "environment": {
-        "PATH": "/path/to/iree/build/tools:$penv{PATH}"
-      }
-    }
-  ]
-}
-```
-
-Then run tests with the local preset:
 ```bash
-ctest --preset RelWithDebInfo-local
-```
-
-Alternatively, set PATH manually before running tests:
-```bash
-export PATH="/path/to/iree/build/tools:$PATH"
 ctest --preset RelWithDebInfo
 ```
 
@@ -96,7 +68,7 @@ For the experimental IR-based compilation pipeline:
 # Then:
 cmake --preset RelWithDebInfo-MLIR
 cmake --build --preset RelWithDebInfo-MLIR
-ctest --preset RelWithDebInfo-MLIR-local
+ctest --preset RelWithDebInfo-MLIR
 ```
 
 ## Usage
@@ -183,7 +155,7 @@ When enabled, the Torch-MLIR path runs a 9-step compilation pipeline
 2. **CSE** — Deduplicate constants and identical list constructs
 3. **offload** — Outline supported `aten` ops into `hipdnn.graph` regions
 4. **canonicalize + CSE** — Clean up dead ops, deduplicate cloned constants
-5. **graph-to-executable** — Compile `hipdnn.graph` regions via `iree-compile`, replace with `hipdnn.executable` ops
+5. **graph-to-executable** — Compile `hipdnn.graph` regions via hipDNN/Fusilli backend, replace with `hipdnn.executable` ops
 6. **backend-legalize** — Lower torch types to builtin tensors, convert `hipdnn.executable` to DPS `hipdnn.execute`
 7. **empty-tensor-elimination** — Fold `tensor.empty` into DPS destinations
 8. **one-shot-bufferize** — Convert tensor program to memref program
