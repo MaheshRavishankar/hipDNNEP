@@ -257,6 +257,51 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
   }
 }
 
+// Check if a pointwise binary op (Mul, Sub, Add, Div) is supported by this EP
+static bool IsSupportedPointwise(Ort::ConstNode node) {
+  try {
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    // Pointwise binary ops require exactly 2 inputs and 1 output
+    if (inputs.size() != 2 || outputs.size() != 1) {
+      return false;
+    }
+
+    // Check data types - we support float and float16
+    ONNXTensorElementDataType a_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType b_type = GetTensorElementType(inputs[1]);
+    ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
+
+    bool supported_type =
+        (a_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+         a_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) &&
+        a_type == b_type && a_type == y_type;
+
+    if (!supported_type) {
+      return false;
+    }
+
+    // Both inputs must have static shapes
+    auto a_shape = GetTensorShape(inputs[0]);
+    auto b_shape = GetTensorShape(inputs[1]);
+
+    if (!a_shape.has_value() || !b_shape.has_value()) {
+      return false;  // Dynamic shapes not supported yet
+    }
+
+    // Shapes must match exactly (no broadcasting for now)
+    if (*a_shape != *b_shape) {
+      return false;
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if an op is supported by this EP
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
@@ -275,7 +320,11 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
     }
   }
 
-  // Add more operations here as we implement them
+  if (op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
+      op_type == "Div") {
+    return IsSupportedPointwise(node);
+  }
+
   return false;
 }
 
