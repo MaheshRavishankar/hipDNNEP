@@ -14,6 +14,7 @@ set(MATMUL_TEST_MODELS
   ${CMAKE_CURRENT_BINARY_DIR}/gemm_trans_a_test.onnx
   ${CMAKE_CURRENT_BINARY_DIR}/gemm_trans_b_test.onnx
   ${CMAKE_CURRENT_BINARY_DIR}/gemm_scaled_test.onnx
+  ${CMAKE_CURRENT_BINARY_DIR}/gemm_scalar_bias_test.onnx
 )
 
 add_custom_command(
@@ -34,4 +35,5 @@ target_compile_definitions(hipdnn_ep_tests PRIVATE
   GEMM_TRANS_A_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_trans_a_test.onnx"
   GEMM_TRANS_B_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_trans_b_test.onnx"
   GEMM_SCALED_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_scaled_test.onnx"
+  GEMM_SCALAR_BIAS_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_scalar_bias_test.onnx"
 )

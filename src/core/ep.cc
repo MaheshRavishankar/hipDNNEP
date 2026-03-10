@@ -185,18 +185,29 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
       return false;  // K dimensions must match
     }
 
-    // Check C shape if present (must match output shape, no broadcasting)
+    // Check C shape if present.
+    // Supported shapes: exact match [M,N], or scalar (element count == 1).
     if (inputs.size() == 3) {
       auto c_shape = GetTensorShape(inputs[2]);
-      if (!c_shape.has_value() || c_shape->size() != 2) {
+      if (!c_shape.has_value()) {
         return false;
       }
 
-      int64_t m = trans_a ? (*a_shape)[1] : (*a_shape)[0];
-      int64_t n = trans_b ? (*b_shape)[0] : (*b_shape)[1];
+      int64_t c_numel = 1;
+      for (int64_t d : c_shape.value()) {
+        c_numel *= d;
+      }
 
-      if ((*c_shape)[0] != m || (*c_shape)[1] != n) {
-        return false;  // C must match output shape (no broadcasting)
+      if (c_numel == 1) {
+        // Scalar bias — supported via hipDNN pointwise broadcast
+      } else if (c_shape->size() == 2) {
+        int64_t m = trans_a ? (*a_shape)[1] : (*a_shape)[0];
+        int64_t n = trans_b ? (*b_shape)[0] : (*b_shape)[1];
+        if ((*c_shape)[0] != m || (*c_shape)[1] != n) {
+          return false;  // C must match output shape (no broadcasting)
+        }
+      } else {
+        return false;  // Unsupported C shape
       }
     }
 

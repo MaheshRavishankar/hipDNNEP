@@ -95,6 +95,51 @@ static TensorAttrPtr CreateScalarTensorAttr(
   return attr;
 }
 
+// Check if a value is a scalar constant initializer and, if so, extract its
+// float value.  A "scalar" here means element count == 1 (shape [] or [1]).
+// Returns true when the value was consumed as a constant; false otherwise.
+static bool TryExtractScalarConstant(
+    Ort::ConstValueInfo value_info,
+    float& out_value) {
+  if (!value_info.IsConstantInitializer()) {
+    return false;
+  }
+
+  auto shape = GetTensorShape(value_info);
+  if (!shape.has_value()) {
+    return false;
+  }
+
+  // Compute element count — must be exactly 1.
+  int64_t numel = 1;
+  for (int64_t d : shape.value()) {
+    numel *= d;
+  }
+  if (numel != 1) {
+    return false;
+  }
+
+  // Only float32 scalars are supported for now.
+  ONNXTensorElementDataType elem_type = GetTensorElementType(value_info);
+  if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    return false;
+  }
+
+  Ort::ConstValue init_value{nullptr};
+  Ort::Status status = value_info.GetInitializer(init_value);
+  if (!status.IsOK() || init_value == nullptr) {
+    return false;
+  }
+
+  const float* data = init_value.GetTensorData<float>();
+  if (data == nullptr) {
+    return false;
+  }
+
+  out_value = data[0];
+  return true;
+}
+
 // Create TensorAttributes from a ConstValueInfo
 Status CreateTensorAttr(
     Ort::ConstValueInfo value_info,
@@ -626,7 +671,10 @@ struct HipDNNGraphImpl {
   // Workspace for hipDNN graph
   std::vector<char> workspace_;
 
-  // Graph input/output info
+  // Graph input/output info.
+  // input_uids_ maps each ORT input index to a hipDNN UID.  Embedded scalar
+  // constants get kEmbeddedScalar (-1) — they have no runtime data pointer.
+  static constexpr int64_t kEmbeddedScalar = -1;
   std::vector<int64_t> input_uids_;
   std::vector<int64_t> output_uids_;
   std::vector<std::vector<int64_t>> output_shapes_;
@@ -660,9 +708,29 @@ Status HipDNNGraphImpl::Build(
 
   graph_ = std::make_unique<Graph>();
 
-  // Create TensorAttributes for all graph inputs and add to symbol table
+  // Create TensorAttributes for all graph inputs and add to symbol table.
+  // Scalar constant initializers (element count == 1) are embedded directly
+  // into the graph as ConstantScalar entries instead of becoming runtime
+  // inputs.  This avoids requiring the caller to provide a device pointer
+  // for values that are known at graph-build time.
   input_uids_.reserve(graph_inputs.size());
   for (const auto& input : graph_inputs) {
+    float scalar_value = 0.0f;
+    if (TryExtractScalarConstant(input, scalar_value)) {
+      // Embed the scalar directly — no runtime input needed.
+      auto dtype = ToHipDNNDataType(GetTensorElementType(input));
+      if (!dtype.has_value()) {
+        return Status::Failure("Unsupported data type for scalar constant: " +
+                               input.GetName());
+      }
+      auto attr = CreateScalarTensorAttr(next_uid_++, dtype.value(),
+                                         scalar_value, constants_);
+      attr->set_name(input.GetName());
+      symbol_table_[input.GetName()] = attr;
+      input_uids_.push_back(kEmbeddedScalar);
+      continue;
+    }
+
     TensorAttrPtr attr;
     auto status = CreateTensorAttr(input, next_uid_++, attr);
     if (status.failed()) return status;
@@ -920,7 +988,9 @@ Status HipDNNGraphImpl::Execute(OrtKernelContext* kernel_ctx) {
   try {
     Ort::KernelContext context(kernel_ctx);
 
-    // Validate input/output counts match what we compiled for
+    // Validate input/output counts match what we compiled for.
+    // input_uids_ has one entry per ORT graph input (including embedded
+    // scalars marked with kEmbeddedScalar).
     if (context.GetInputCount() != input_uids_.size()) {
       return Status::Failure("Input count mismatch: expected " +
                              std::to_string(input_uids_.size()) + ", got " +
@@ -935,8 +1005,11 @@ Status HipDNNGraphImpl::Execute(OrtKernelContext* kernel_ctx) {
     // Build variant pack mapping UIDs to data pointers
     std::unordered_map<int64_t, void*> variant_pack;
 
-    // Map graph inputs to their UIDs
+    // Map graph inputs to their UIDs.
+    // Embedded scalars (kEmbeddedScalar) are skipped — their device
+    // pointers come from constants_ below.
     for (size_t i = 0; i < input_uids_.size(); ++i) {
+      if (input_uids_[i] == kEmbeddedScalar) continue;
       Ort::ConstValue input = context.GetInput(i);
       variant_pack[input_uids_[i]] = const_cast<void*>(input.GetTensorRawData());
     }
