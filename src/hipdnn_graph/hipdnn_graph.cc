@@ -7,7 +7,6 @@
 #include <hipdnn_backend.h>
 #include <hipdnn_frontend.hpp>
 
-#include <cstring>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -79,38 +78,6 @@ static bool IsScalarAttr(const TensorAttrPtr& attr) {
   return numel == 1;
 }
 
-// Convert an IEEE 754 half-precision value (stored as uint16_t) to float.
-static float Float16ToFloat(uint16_t h) {
-  uint32_t sign = (static_cast<uint32_t>(h) & 0x8000u) << 16;
-  uint32_t exp = (h >> 10) & 0x1Fu;
-  uint32_t mant = h & 0x03FFu;
-
-  uint32_t result;
-  if (exp == 0) {
-    if (mant == 0) {
-      result = sign;  // +/- zero
-    } else {
-      // Subnormal: normalize
-      exp = 1;
-      while ((mant & 0x0400u) == 0) {
-        mant <<= 1;
-        exp--;
-      }
-      mant &= 0x03FFu;
-      result = sign | ((exp + 127 - 15) << 23) | (mant << 13);
-    }
-  } else if (exp == 0x1Fu) {
-    // Inf / NaN
-    result = sign | 0x7F800000u | (mant << 13);
-  } else {
-    result = sign | ((exp + 127 - 15) << 23) | (mant << 13);
-  }
-
-  float f;
-  std::memcpy(&f, &result, sizeof(f));
-  return f;
-}
-
 // Create a pass-by-value scalar TensorAttributes for pointwise ops.
 // The value is embedded directly in the graph via set_value(), so no
 // runtime device pointer is needed at execute time.
@@ -121,19 +88,31 @@ static TensorAttrPtr CreateScalarTensorAttr(int64_t uid, float value) {
   return attr;
 }
 
-// Check if a value is a scalar constant initializer and, if so, extract its
-// float value.  A "scalar" here means element count == 1 (shape [] or [1]).
-// Returns true when the value was consumed as a constant; false otherwise.
-static bool TryExtractScalarConstant(
-    Ort::ConstValueInfo value_info,
-    float& out_value) {
+// Check if a value is a scalar constant initializer and, if so, create a
+// pass-by-value TensorAttributes with the original data type preserved.
+// A "scalar" here means element count == 1 (shape [] or [1]).
+// Returns a valid TensorAttrPtr on success, nullptr otherwise.
+//
+// The value is stored via TensorAttributes::set_value<T>() using the closest
+// type that the hipDNN API supports:
+//   ONNX float       -> set_value<float>
+//   ONNX float16     -> set_value<half>        (from raw bits)
+//   ONNX double      -> set_value<double>
+//   ONNX int32       -> set_value<int32_t>
+//   ONNX uint8       -> set_value<uint8_t>
+//   ONNX int64/int8/int16/uint16 -> set_value<int32_t> (narrowing; the API
+//       does not support these types directly)
+static TensorAttrPtr TryExtractScalarConstant(Ort::ConstValueInfo value_info) {
+  using hipdnn_data_sdk::types::half;
+  using hipdnn_frontend::graph::TensorAttributes;
+
   if (!value_info.IsConstantInitializer()) {
-    return false;
+    return nullptr;
   }
 
   auto shape = GetTensorShape(value_info);
   if (!shape.has_value()) {
-    return false;
+    return nullptr;
   }
 
   // Compute element count — must be exactly 1.
@@ -142,77 +121,79 @@ static bool TryExtractScalarConstant(
     numel *= d;
   }
   if (numel != 1) {
-    return false;
+    return nullptr;
   }
 
   Ort::ConstValue init_value{nullptr};
   Ort::Status status = value_info.GetInitializer(init_value);
   if (!status.IsOK() || init_value == nullptr) {
-    return false;
+    return nullptr;
   }
 
-  // Extract the scalar value, converting to float32.  The pass-by-value
-  // tensor attr uses float (set via set_value(float)), matching the hipDNN
-  // compute data type for all supported inputs.
+  // Extract the scalar and call set_value() with the original (or closest
+  // supported) type so that hipDNN sees the value in its native precision.
+  auto attr = std::make_shared<TensorAttributes>();
   ONNXTensorElementDataType elem_type = GetTensorElementType(value_info);
   switch (elem_type) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
       const float* data = init_value.GetTensorData<float>();
-      if (data == nullptr) return false;
-      out_value = data[0];
-      return true;
+      if (data == nullptr) return nullptr;
+      attr->set_value(data[0]);
+      break;
     }
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
       const uint16_t* data = init_value.GetTensorData<uint16_t>();
-      if (data == nullptr) return false;
-      out_value = Float16ToFloat(data[0]);
-      return true;
+      if (data == nullptr) return nullptr;
+      attr->set_value(half::from_bits(data[0]));
+      break;
     }
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: {
       const double* data = init_value.GetTensorData<double>();
-      if (data == nullptr) return false;
-      out_value = static_cast<float>(data[0]);
-      return true;
+      if (data == nullptr) return nullptr;
+      attr->set_value(data[0]);
+      break;
     }
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
       const int32_t* data = init_value.GetTensorData<int32_t>();
-      if (data == nullptr) return false;
-      out_value = static_cast<float>(data[0]);
-      return true;
-    }
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
-      const int64_t* data = init_value.GetTensorData<int64_t>();
-      if (data == nullptr) return false;
-      out_value = static_cast<float>(data[0]);
-      return true;
-    }
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
-      const int8_t* data = init_value.GetTensorData<int8_t>();
-      if (data == nullptr) return false;
-      out_value = static_cast<float>(data[0]);
-      return true;
+      if (data == nullptr) return nullptr;
+      attr->set_value(data[0]);
+      break;
     }
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: {
       const uint8_t* data = init_value.GetTensorData<uint8_t>();
-      if (data == nullptr) return false;
-      out_value = static_cast<float>(data[0]);
-      return true;
+      if (data == nullptr) return nullptr;
+      attr->set_value(data[0]);
+      break;
+    }
+    // Types not directly supported by set_value() — convert to int32_t.
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
+      const int64_t* data = init_value.GetTensorData<int64_t>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(static_cast<int32_t>(data[0]));
+      break;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
+      const int8_t* data = init_value.GetTensorData<int8_t>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(static_cast<int32_t>(data[0]));
+      break;
     }
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: {
       const int16_t* data = init_value.GetTensorData<int16_t>();
-      if (data == nullptr) return false;
-      out_value = static_cast<float>(data[0]);
-      return true;
+      if (data == nullptr) return nullptr;
+      attr->set_value(static_cast<int32_t>(data[0]));
+      break;
     }
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: {
       const uint16_t* data = init_value.GetTensorData<uint16_t>();
-      if (data == nullptr) return false;
-      out_value = static_cast<float>(data[0]);
-      return true;
+      if (data == nullptr) return nullptr;
+      attr->set_value(static_cast<int32_t>(data[0]));
+      break;
     }
     default:
-      return false;
+      return nullptr;
   }
+  return attr;
 }
 
 // Create TensorAttributes from a ConstValueInfo
@@ -853,11 +834,9 @@ Status HipDNNGraphImpl::Build(
   // for values that are known at graph-build time.
   input_uids_.reserve(graph_inputs.size());
   for (const auto& input : graph_inputs) {
-    float scalar_value = 0.0f;
-    if (TryExtractScalarConstant(input, scalar_value)) {
+    if (auto attr = TryExtractScalarConstant(input)) {
       // Embed the scalar directly via pass-by-value — no runtime input needed.
-      auto attr = CreateScalarTensorAttr(next_uid_++, scalar_value);
-      attr->set_name(input.GetName());
+      attr->set_uid(next_uid_++).set_name(input.GetName());
       symbol_table_[input.GetName()] = attr;
       input_uids_.push_back(kEmbeddedScalar);
       continue;
