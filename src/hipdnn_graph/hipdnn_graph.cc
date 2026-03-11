@@ -128,7 +128,11 @@ static bool TryExtractScalarConstant(
     return false;
   }
 
-  // Only float32 scalars are supported for now.
+  // Only float32 scalars are supported for embedding.  Non-float32 scalar
+  // constant initializers (e.g. float16) fall through to CreateTensorAttr,
+  // which creates a normal [1]-shaped tensor that hipDNN broadcasts via
+  // pointwise ops.  TODO: add float16 support when ConstantScalar grows a
+  // dtype field.
   ONNXTensorElementDataType elem_type = GetTensorElementType(value_info);
   if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     return false;

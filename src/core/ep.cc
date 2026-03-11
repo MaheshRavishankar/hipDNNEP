@@ -223,7 +223,9 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
       }
 
       if (c_numel == 1) {
-        // Scalar bias — supported via hipDNN pointwise broadcast
+        // Scalar bias — constant initializers are embedded at graph-build
+        // time; runtime scalar inputs become [1]-shaped tensors that hipDNN
+        // broadcasts via pointwise ADD.
       } else if (c_shape->size() == 2) {
         int64_t m = trans_a ? (*a_shape)[1] : (*a_shape)[0];
         int64_t n = trans_b ? (*b_shape)[0] : (*b_shape)[1];
