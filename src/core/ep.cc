@@ -210,7 +210,10 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
     }
 
     // Check C shape if present.
-    // Supported shapes: exact match [M,N], or scalar (element count == 1).
+    // Supported shapes: scalar (element count == 1) or exact match [M,N].
+    // Scalar constant initializers are embedded at graph-build time; runtime
+    // scalar inputs become [1]-shaped tensors that hipDNN broadcasts via
+    // pointwise ADD.
     if (inputs.size() == 3) {
       auto c_shape = GetTensorShape(inputs[2]);
       if (!c_shape.has_value()) {
@@ -222,18 +225,19 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
         c_numel *= d;
       }
 
+      // Scalar bias is always supported.
       if (c_numel == 1) {
-        // Scalar bias — constant initializers are embedded at graph-build
-        // time; runtime scalar inputs become [1]-shaped tensors that hipDNN
-        // broadcasts via pointwise ADD.
-      } else if (c_shape->size() == 2) {
-        int64_t m = trans_a ? (*a_shape)[1] : (*a_shape)[0];
-        int64_t n = trans_b ? (*b_shape)[0] : (*b_shape)[1];
-        if ((*c_shape)[0] != m || (*c_shape)[1] != n) {
-          return false;  // C must match output shape (no broadcasting)
-        }
-      } else {
-        return false;  // Unsupported C shape
+        return true;
+      }
+
+      // Non-scalar must be 2-D matching [M, N].
+      if (c_shape->size() != 2) {
+        return false;
+      }
+      int64_t m = trans_a ? (*a_shape)[1] : (*a_shape)[0];
+      int64_t n = trans_b ? (*b_shape)[0] : (*b_shape)[1];
+      if ((*c_shape)[0] != m || (*c_shape)[1] != n) {
+        return false;
       }
     }
 
