@@ -70,6 +70,30 @@ static bool IsSupportedConv(Ort::ConstNode node) {
       return false;
     }
 
+    // Check bias (3rd input) if present.
+    // Supported shapes: [C_out] (per-channel) or scalar (element count == 1).
+    if (inputs.size() >= 3) {
+      ONNXTensorElementDataType b_type = GetTensorElementType(inputs[2]);
+      if (b_type != x_type) {
+        return false;  // Bias type must match input type
+      }
+
+      auto b_shape = GetTensorShape(inputs[2]);
+      if (!b_shape.has_value()) {
+        return false;
+      }
+
+      int64_t b_numel = 1;
+      for (int64_t d : b_shape.value()) {
+        b_numel *= d;
+      }
+
+      int64_t c_out = (*w_shape)[0];
+      if (b_numel != 1 && !(b_shape->size() == 1 && (*b_shape)[0] == c_out)) {
+        return false;  // Bias must be scalar or [C_out]
+      }
+    }
+
     return true;
 
   } catch (...) {

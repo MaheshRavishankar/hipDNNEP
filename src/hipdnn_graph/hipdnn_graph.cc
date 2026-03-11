@@ -71,6 +71,15 @@ std::optional<hipdnn_frontend::DataType> GetComputeDataType(
 
 using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
 
+// Return true if the tensor has exactly one element (scalar).
+static bool IsScalarAttr(const TensorAttrPtr& attr) {
+  int64_t numel = 1;
+  for (int64_t d : attr->get_dim()) {
+    numel *= d;
+  }
+  return numel == 1;
+}
+
 // Scalar constant that needs device memory at execution time.
 struct ConstantScalar {
   int64_t uid;
@@ -170,14 +179,20 @@ Status CreateTensorAttr(
 }
 
 // Add Conv operation to hipDNN graph
-// Takes input tensor attributes (X, W), returns output tensor attribute (Y)
+// Takes input tensor attributes (X, W, optional B), returns output tensor
+// attribute (Y).  B may be a scalar (embedded constant) or a 1D per-channel
+// tensor; both are handled via a pointwise ADD that broadcasts over the
+// convolution output.
 Status AddConvNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
     const std::vector<TensorAttrPtr>& input_attrs,
-    TensorAttrPtr& output_attr) {
+    TensorAttrPtr& output_attr,
+    int64_t& next_uid,
+    std::vector<ConstantScalar>& constants) {
   using namespace hipdnn_frontend::graph;
   using hipdnn_frontend::ConvolutionMode;
+  using hipdnn_frontend::PointwiseMode;
 
   if (input_attrs.size() < 2) {
     return Status::Failure("Conv requires at least 2 input tensor attributes");
@@ -185,6 +200,14 @@ Status AddConvNode(
 
   const auto& x_attr = input_attrs[0];
   const auto& w_attr = input_attrs[1];
+
+  // X and W must be tensors, not scalars.
+  if (IsScalarAttr(x_attr)) {
+    return Status::Failure("Conv input X must be a tensor, not a scalar");
+  }
+  if (IsScalarAttr(w_attr)) {
+    return Status::Failure("Conv filter W must be a tensor, not a scalar");
+  }
 
   // Extract Conv attributes
   std::vector<int64_t> pads = GetIntsAttrOrDefault(node, "pads", {0, 0, 0, 0});
@@ -215,6 +238,18 @@ Status AddConvNode(
 
   // Add convolution to graph - returns output tensor attributes
   output_attr = graph.conv_fprop(x_attr, w_attr, conv_attrs);
+
+  // Optional bias: B may be a scalar or a 1D [C_out] tensor.
+  // Both are handled via pointwise ADD which broadcasts over the conv output.
+  if (input_attrs.size() >= 3) {
+    auto dtype = compute_dtype.value();
+    output_attr->set_data_type(dtype);
+    auto bias = input_attrs[2];
+
+    PointwiseAttributes add;
+    add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
+    output_attr = graph.pointwise(output_attr, bias, add);
+  }
 
   return Status::Success();
 }
@@ -254,14 +289,22 @@ Status AddMatMulNode(
     return Status::Failure("MatMul/Gemm requires at least 2 input tensor attributes");
   }
 
+  auto a_attr = input_attrs[0];
+  auto b_attr = input_attrs[1];
+
+  // A and B must be tensors, not scalars.
+  if (IsScalarAttr(a_attr)) {
+    return Status::Failure("MatMul/Gemm input A must be a tensor, not a scalar");
+  }
+  if (IsScalarAttr(b_attr)) {
+    return Status::Failure("MatMul/Gemm input B must be a tensor, not a scalar");
+  }
+
   // Gemm-specific attributes (defaults match MatMul semantics)
   int64_t trans_a = GetIntAttrOrDefault(node, "transA", 0);
   int64_t trans_b = GetIntAttrOrDefault(node, "transB", 0);
   float alpha = GetFloatAttrOrDefault(node, "alpha", 1.0f);
   float beta = GetFloatAttrOrDefault(node, "beta", 1.0f);
-
-  auto a_attr = input_attrs[0];
-  auto b_attr = input_attrs[1];
 
   // Handle transpose by permuting dims and strides (zero-copy).
   // Gemm transA/transB swap the last two axes.
@@ -341,7 +384,8 @@ Status AddNode(
 
   if (op_type == "Conv") {
     TensorAttrPtr y_attr;
-    auto status = AddConvNode(graph, node, input_attrs, y_attr);
+    auto status =
+        AddConvNode(graph, node, input_attrs, y_attr, next_uid, constants);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -433,9 +477,12 @@ mlir::FailureOr<TensorAttrPtr> CreateTensorAttrFromMLIR(
 Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
                            mlir::Operation* op,
                            const std::vector<TensorAttrPtr>& input_attrs,
-                           TensorAttrPtr& output_attr) {
+                           TensorAttrPtr& output_attr,
+                           int64_t& next_uid,
+                           std::vector<ConstantScalar>& constants) {
   using namespace hipdnn_frontend::graph;
   using hipdnn_frontend::ConvolutionMode;
+  using hipdnn_frontend::PointwiseMode;
 
   if (input_attrs.size() < 2) {
     return Status::Failure("Conv requires at least 2 input tensor attributes");
@@ -443,6 +490,14 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
 
   const auto& x_attr = input_attrs[0];
   const auto& w_attr = input_attrs[1];
+
+  // X and W must be tensors, not scalars.
+  if (IsScalarAttr(x_attr)) {
+    return Status::Failure("Conv input X must be a tensor, not a scalar");
+  }
+  if (IsScalarAttr(w_attr)) {
+    return Status::Failure("Conv filter W must be a tensor, not a scalar");
+  }
 
   std::vector<int64_t> pads = {0, 0, 0, 0};
   std::vector<int64_t> strides = {1, 1};
@@ -487,6 +542,17 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
       .set_compute_data_type(compute_dtype.value());
 
   output_attr = graph.conv_fprop(x_attr, w_attr, conv_attrs);
+
+  // Optional bias: may be a scalar or a 1D [C_out] tensor.
+  if (input_attrs.size() >= 3) {
+    auto dtype = compute_dtype.value();
+    output_attr->set_data_type(dtype);
+    auto bias = input_attrs[2];
+
+    PointwiseAttributes add;
+    add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
+    output_attr = graph.pointwise(output_attr, bias, add);
+  }
 
   return Status::Success();
 }
@@ -551,6 +617,14 @@ Status AddMatMulNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
     b_attr = input_attrs[1];
   }
 
+  // A and B must be tensors, not scalars.
+  if (IsScalarAttr(a_attr)) {
+    return Status::Failure("MatMul input A must be a tensor, not a scalar");
+  }
+  if (IsScalarAttr(b_attr)) {
+    return Status::Failure("MatMul input B must be a tensor, not a scalar");
+  }
+
   auto compute_dtype =
       GetComputeDataType(a_attr->get_data_type(), b_attr->get_data_type());
   if (!compute_dtype.has_value()) {
@@ -612,7 +686,8 @@ Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
 
   if (op_name == "torch.aten.convolution" || op_name == "torch.aten.conv2d") {
     TensorAttrPtr y_attr;
-    auto status = AddConvNodeFromMLIR(graph, op, input_attrs, y_attr);
+    auto status = AddConvNodeFromMLIR(graph, op, input_attrs, y_attr,
+                                      next_uid, constants);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
