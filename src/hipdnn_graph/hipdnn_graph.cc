@@ -170,7 +170,7 @@ static bool TryExtractScalarConstant(
 
   // Extract the scalar value, converting to float32.  ConstantScalar always
   // stores float32 and the embedded tensor attr uses DataType::FLOAT (the
-  // hipDNN compute data type for all float-family inputs).
+  // hipDNN compute data type for all supported inputs).
   ONNXTensorElementDataType elem_type = GetTensorElementType(value_info);
   switch (elem_type) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
@@ -187,6 +187,42 @@ static bool TryExtractScalarConstant(
     }
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: {
       const double* data = init_value.GetTensorData<double>();
+      if (data == nullptr) return false;
+      out_value = static_cast<float>(data[0]);
+      return true;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
+      const int32_t* data = init_value.GetTensorData<int32_t>();
+      if (data == nullptr) return false;
+      out_value = static_cast<float>(data[0]);
+      return true;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
+      const int64_t* data = init_value.GetTensorData<int64_t>();
+      if (data == nullptr) return false;
+      out_value = static_cast<float>(data[0]);
+      return true;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
+      const int8_t* data = init_value.GetTensorData<int8_t>();
+      if (data == nullptr) return false;
+      out_value = static_cast<float>(data[0]);
+      return true;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: {
+      const uint8_t* data = init_value.GetTensorData<uint8_t>();
+      if (data == nullptr) return false;
+      out_value = static_cast<float>(data[0]);
+      return true;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: {
+      const int16_t* data = init_value.GetTensorData<int16_t>();
+      if (data == nullptr) return false;
+      out_value = static_cast<float>(data[0]);
+      return true;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: {
+      const uint16_t* data = init_value.GetTensorData<uint16_t>();
       if (data == nullptr) return false;
       out_value = static_cast<float>(data[0]);
       return true;
