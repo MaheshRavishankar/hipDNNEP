@@ -9,6 +9,7 @@
 
 #include <hip/hip_runtime_api.h>
 
+#include <cstring>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -80,7 +81,40 @@ static bool IsScalarAttr(const TensorAttrPtr& attr) {
   return numel == 1;
 }
 
+// Convert an IEEE 754 half-precision value (stored as uint16_t) to float.
+static float Float16ToFloat(uint16_t h) {
+  uint32_t sign = (static_cast<uint32_t>(h) & 0x8000u) << 16;
+  uint32_t exp = (h >> 10) & 0x1Fu;
+  uint32_t mant = h & 0x03FFu;
+
+  uint32_t result;
+  if (exp == 0) {
+    if (mant == 0) {
+      result = sign;  // +/- zero
+    } else {
+      // Subnormal: normalize
+      exp = 1;
+      while ((mant & 0x0400u) == 0) {
+        mant <<= 1;
+        exp--;
+      }
+      mant &= 0x03FFu;
+      result = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+  } else if (exp == 0x1Fu) {
+    // Inf / NaN
+    result = sign | 0x7F800000u | (mant << 13);
+  } else {
+    result = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+  }
+
+  float f;
+  std::memcpy(&f, &result, sizeof(f));
+  return f;
+}
+
 // Scalar constant that needs device memory at execution time.
+// The value is always stored as float32 regardless of the original data type.
 struct ConstantScalar {
   int64_t uid;
   float value;
@@ -128,29 +162,38 @@ static bool TryExtractScalarConstant(
     return false;
   }
 
-  // Only float32 scalars are supported for embedding.  Non-float32 scalar
-  // constant initializers (e.g. float16) fall through to CreateTensorAttr,
-  // which creates a normal [1]-shaped tensor that hipDNN broadcasts via
-  // pointwise ops.  TODO: add float16 support when ConstantScalar grows a
-  // dtype field.
-  ONNXTensorElementDataType elem_type = GetTensorElementType(value_info);
-  if (elem_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    return false;
-  }
-
   Ort::ConstValue init_value{nullptr};
   Ort::Status status = value_info.GetInitializer(init_value);
   if (!status.IsOK() || init_value == nullptr) {
     return false;
   }
 
-  const float* data = init_value.GetTensorData<float>();
-  if (data == nullptr) {
-    return false;
+  // Extract the scalar value, converting to float32.  ConstantScalar always
+  // stores float32 and the embedded tensor attr uses DataType::FLOAT (the
+  // hipDNN compute data type for all float-family inputs).
+  ONNXTensorElementDataType elem_type = GetTensorElementType(value_info);
+  switch (elem_type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
+      const float* data = init_value.GetTensorData<float>();
+      if (data == nullptr) return false;
+      out_value = data[0];
+      return true;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
+      const uint16_t* data = init_value.GetTensorData<uint16_t>();
+      if (data == nullptr) return false;
+      out_value = Float16ToFloat(data[0]);
+      return true;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: {
+      const double* data = init_value.GetTensorData<double>();
+      if (data == nullptr) return false;
+      out_value = static_cast<float>(data[0]);
+      return true;
+    }
+    default:
+      return false;
   }
-
-  out_value = data[0];
-  return true;
 }
 
 // Create TensorAttributes from a ConstValueInfo
@@ -797,13 +840,11 @@ Status HipDNNGraphImpl::Build(
     float scalar_value = 0.0f;
     if (TryExtractScalarConstant(input, scalar_value)) {
       // Embed the scalar directly — no runtime input needed.
-      auto dtype = ToHipDNNDataType(GetTensorElementType(input));
-      if (!dtype.has_value()) {
-        return Status::Failure("Unsupported data type for scalar constant: " +
-                               input.GetName());
-      }
-      auto attr = CreateScalarTensorAttr(next_uid_++, dtype.value(),
-                                         scalar_value, constants_);
+      // Use FLOAT for the tensor attr: the value has already been converted
+      // to float32, and hipDNN computes in float32 for all float-family types.
+      auto attr = CreateScalarTensorAttr(
+          next_uid_++, hipdnn_frontend::DataType::FLOAT, scalar_value,
+          constants_);
       attr->set_name(input.GetName());
       symbol_table_[input.GetName()] = attr;
       input_uids_.push_back(kEmbeddedScalar);
