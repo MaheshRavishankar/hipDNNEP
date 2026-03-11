@@ -261,6 +261,19 @@ Status CreateTensorAttr(
   return Status::Success();
 }
 
+// Reshape a 1D bias [C] to NCHW-broadcast shape [1, C, 1, 1] so that hipDNN
+// pointwise ADD can broadcast it over the 4D conv output.  If the bias is
+// already 4D or scalar (dim={1}), it is left unchanged.
+static void ReshapeBiasForConv(const TensorAttrPtr& bias) {
+  auto bias_dim = bias->get_dim();
+
+  // 1D bias [C] -> [1, C, 1, 1]
+  if (bias_dim.size() == 1 && bias_dim[0] != 1) {
+    bias->set_dim({1, bias_dim[0], 1, 1});
+    bias->set_stride({bias_dim[0], 1, 1, 1});
+  }
+}
+
 // Add Conv operation to hipDNN graph
 // Takes input tensor attributes (X, W, optional B), returns output tensor
 // attribute (Y).  B may be a scalar (embedded constant) or a 1D per-channel
@@ -328,6 +341,7 @@ Status AddConvNode(
     auto dtype = compute_dtype.value();
     output_attr->set_data_type(dtype);
     auto bias = input_attrs[2];
+    ReshapeBiasForConv(bias);
 
     PointwiseAttributes add;
     add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
@@ -631,6 +645,7 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
     auto dtype = compute_dtype.value();
     output_attr->set_data_type(dtype);
     auto bias = input_attrs[2];
+    ReshapeBiasForConv(bias);
 
     PointwiseAttributes add;
     add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
