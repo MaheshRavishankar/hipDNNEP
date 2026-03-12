@@ -307,13 +307,18 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
       return false;
     }
 
-    // Check data types - all inputs and output must share the same element type.
-    // The hipDNN backend handles type compatibility, so we accept any ONNX type.
+    // Check data types - all inputs and output must share the same element type
+    // and be a type that hipDNN supports (FLOAT or FLOAT16).
     ONNXTensorElementDataType a_type = GetTensorElementType(inputs[0]);
     ONNXTensorElementDataType b_type = GetTensorElementType(inputs[1]);
     ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
 
     if (a_type != b_type || a_type != y_type) {
+      return false;
+    }
+
+    if (a_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        a_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
       return false;
     }
 
@@ -350,6 +355,9 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
 
+  // Accept Conv in the default ONNX domain and in ORT's internal NHWC domain
+  // (set by the layout transformer when the EP prefers NHWC).
+  // TODO: Enable NHWC domain when GetPreferredDataLayout is activated.
   if (op_type == "Conv") {
     return IsSupportedConv(node);
   }
@@ -398,6 +406,8 @@ HipDNNEp::HipDNNEp(HipDNNEpFactory& factory, const Config& config, const OrtLogg
   ReleaseNodeComputeInfos = ReleaseNodeComputeInfosImpl;
   CreateAllocator = CreateAllocatorImpl;
   CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
+  // TODO: Uncomment when hipDNN/Fusilli supports NHWC convolutions.
+  // GetPreferredDataLayout = GetPreferredDataLayoutImpl;
 
   // Initialize hipDNN
   hipdnnStatus_t status = hipdnnCreate(&hipdnn_handle_);
