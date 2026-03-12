@@ -7,8 +7,6 @@
 #include <hipdnn_backend.h>
 #include <hipdnn_frontend.hpp>
 
-#include <hip/hip_runtime_api.h>
-
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -71,27 +69,130 @@ std::optional<hipdnn_frontend::DataType> GetComputeDataType(
 
 using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
 
-// Scalar constant that needs device memory at execution time.
-struct ConstantScalar {
-  int64_t uid;
-  float value;
-};
+// Return true if the tensor has exactly one element (scalar).
+static bool IsScalarAttr(const TensorAttrPtr& attr) {
+  int64_t numel = 1;
+  for (int64_t d : attr->get_dim()) {
+    numel *= d;
+  }
+  return numel == 1;
+}
 
-// Create a scalar TensorAttributes for pointwise ops.
-// The value is tracked in `constants` for device memory allocation.
-static TensorAttrPtr CreateScalarTensorAttr(
-    int64_t uid,
-    hipdnn_frontend::DataType dtype,
-    float value,
-    std::vector<ConstantScalar>& constants) {
+// Create a pass-by-value scalar TensorAttributes for pointwise ops.
+// The value is embedded directly in the graph via set_value(), so no
+// runtime device pointer is needed at execute time.
+static TensorAttrPtr CreateScalarTensorAttr(int64_t uid, float value) {
   auto attr = std::make_shared<hipdnn_frontend::graph::TensorAttributes>();
-  attr->set_uid(uid)
-      .set_name("constant_" + std::to_string(uid))
-      .set_data_type(dtype)
-      .set_dim({1})
-      .set_stride({1})
-      .set_is_virtual(false);
-  constants.push_back({uid, value});
+  attr->set_value(value);
+  attr->set_uid(uid).set_name("constant_" + std::to_string(uid));
+  return attr;
+}
+
+// Check if a value is a scalar constant initializer and, if so, create a
+// pass-by-value TensorAttributes with the original data type preserved.
+// A "scalar" here means element count == 1 (shape [] or [1]).
+// Returns a valid TensorAttrPtr on success, nullptr otherwise.
+//
+// The value is stored via TensorAttributes::set_value<T>() using the closest
+// type that the hipDNN API supports:
+//   ONNX float       -> set_value<float>
+//   ONNX float16     -> set_value<half>        (from raw bits)
+//   ONNX double      -> set_value<double>
+//   ONNX int32       -> set_value<int32_t>
+//   ONNX uint8       -> set_value<uint8_t>
+//   ONNX int64/int8/int16/uint16 -> set_value<int32_t> (narrowing; the API
+//       does not support these types directly)
+static TensorAttrPtr TryExtractScalarConstant(Ort::ConstValueInfo value_info) {
+  using hipdnn_data_sdk::types::half;
+  using hipdnn_frontend::graph::TensorAttributes;
+
+  if (!value_info.IsConstantInitializer()) {
+    return nullptr;
+  }
+
+  auto shape = GetTensorShape(value_info);
+  if (!shape.has_value()) {
+    return nullptr;
+  }
+
+  // Compute element count — must be exactly 1.
+  int64_t numel = 1;
+  for (int64_t d : shape.value()) {
+    numel *= d;
+  }
+  if (numel != 1) {
+    return nullptr;
+  }
+
+  Ort::ConstValue init_value{nullptr};
+  Ort::Status status = value_info.GetInitializer(init_value);
+  if (!status.IsOK() || init_value == nullptr) {
+    return nullptr;
+  }
+
+  // Extract the scalar and call set_value() with the original (or closest
+  // supported) type so that hipDNN sees the value in its native precision.
+  auto attr = std::make_shared<TensorAttributes>();
+  ONNXTensorElementDataType elem_type = GetTensorElementType(value_info);
+  switch (elem_type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
+      const float* data = init_value.GetTensorData<float>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(data[0]);
+      break;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
+      const uint16_t* data = init_value.GetTensorData<uint16_t>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(half::from_bits(data[0]));
+      break;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: {
+      const double* data = init_value.GetTensorData<double>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(data[0]);
+      break;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
+      const int32_t* data = init_value.GetTensorData<int32_t>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(data[0]);
+      break;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: {
+      const uint8_t* data = init_value.GetTensorData<uint8_t>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(data[0]);
+      break;
+    }
+    // Types not directly supported by set_value() — convert to int32_t.
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
+      const int64_t* data = init_value.GetTensorData<int64_t>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(static_cast<int32_t>(data[0]));
+      break;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
+      const int8_t* data = init_value.GetTensorData<int8_t>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(static_cast<int32_t>(data[0]));
+      break;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: {
+      const int16_t* data = init_value.GetTensorData<int16_t>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(static_cast<int32_t>(data[0]));
+      break;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: {
+      const uint16_t* data = init_value.GetTensorData<uint16_t>();
+      if (data == nullptr) return nullptr;
+      attr->set_value(static_cast<int32_t>(data[0]));
+      break;
+    }
+    default:
+      return nullptr;
+  }
   return attr;
 }
 
@@ -124,15 +225,57 @@ Status CreateTensorAttr(
   return Status::Success();
 }
 
+// Reshape a 1D bias [C] to NCHW-broadcast shape [1, C, 1, 1] so that hipDNN
+// pointwise ADD can broadcast it over the 4D conv output.
+//
+// Accepted inputs:
+//   - pass-by-value scalar   -> left unchanged (broadcasts naturally)
+//   - 1D [C]                 -> reshaped to [1, C, 1, 1]
+//   - 4D (already broadcast) -> left unchanged
+//
+// This function assumes NCHW layout.  The EP currently only supports NCHW
+// convolutions (strides are computed via ComputeStrides which produces
+// row-major / NCHW order).  NHWC would require [1, 1, 1, C] instead.
+// TODO: Support NHWC layout when the EP adds channel-last convolutions.
+static Status ReshapeBiasForConv(const TensorAttrPtr& bias) {
+  // Pass-by-value scalars have dim={1} set by set_value(); leave them alone.
+  if (bias->get_pass_by_value()) {
+    return Status::Success();
+  }
+
+  auto bias_dim = bias->get_dim();
+
+  if (bias_dim.size() == 4) {
+    // Already 4D — assume the caller shaped it correctly.
+    return Status::Success();
+  }
+
+  if (bias_dim.size() == 1) {
+    // 1D bias [C] -> NCHW broadcast shape [1, C, 1, 1].
+    bias->set_dim({1, bias_dim[0], 1, 1});
+    bias->set_stride({bias_dim[0], 1, 1, 1});
+    return Status::Success();
+  }
+
+  return Status::Failure(
+      "Conv bias has unsupported rank " + std::to_string(bias_dim.size()) +
+      "; expected 1D [C] or 4D [1,C,1,1]");
+}
+
 // Add Conv operation to hipDNN graph
-// Takes input tensor attributes (X, W), returns output tensor attribute (Y)
+// Takes input tensor attributes (X, W, optional B), returns output tensor
+// attribute (Y).  B may be a scalar (embedded constant) or a 1D per-channel
+// tensor; both are handled via a pointwise ADD that broadcasts over the
+// convolution output.
 Status AddConvNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
     const std::vector<TensorAttrPtr>& input_attrs,
-    TensorAttrPtr& output_attr) {
+    TensorAttrPtr& output_attr,
+    int64_t& next_uid) {
   using namespace hipdnn_frontend::graph;
   using hipdnn_frontend::ConvolutionMode;
+  using hipdnn_frontend::PointwiseMode;
 
   if (input_attrs.size() < 2) {
     return Status::Failure("Conv requires at least 2 input tensor attributes");
@@ -140,6 +283,14 @@ Status AddConvNode(
 
   const auto& x_attr = input_attrs[0];
   const auto& w_attr = input_attrs[1];
+
+  // X and W must be tensors, not scalars.
+  if (IsScalarAttr(x_attr)) {
+    return Status::Failure("Conv input X must be a tensor, not a scalar");
+  }
+  if (IsScalarAttr(w_attr)) {
+    return Status::Failure("Conv filter W must be a tensor, not a scalar");
+  }
 
   // Extract Conv attributes
   std::vector<int64_t> pads = GetIntsAttrOrDefault(node, "pads", {0, 0, 0, 0});
@@ -171,6 +322,20 @@ Status AddConvNode(
   // Add convolution to graph - returns output tensor attributes
   output_attr = graph.conv_fprop(x_attr, w_attr, conv_attrs);
 
+  // Optional bias: B may be a scalar or a 1D [C_out] tensor.
+  // Both are handled via pointwise ADD which broadcasts over the conv output.
+  if (input_attrs.size() >= 3) {
+    auto dtype = compute_dtype.value();
+    output_attr->set_data_type(dtype);
+    auto bias = input_attrs[2];
+    auto reshape_status = ReshapeBiasForConv(bias);
+    if (reshape_status.failed()) return reshape_status;
+
+    PointwiseAttributes add;
+    add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
+    output_attr = graph.pointwise(output_attr, bias, add);
+  }
+
   return Status::Success();
 }
 
@@ -200,8 +365,7 @@ Status AddMatMulNode(
     Ort::ConstNode node,
     const std::vector<TensorAttrPtr>& input_attrs,
     TensorAttrPtr& output_attr,
-    int64_t& next_uid,
-    std::vector<ConstantScalar>& constants) {
+    int64_t& next_uid) {
   using namespace hipdnn_frontend::graph;
   using hipdnn_frontend::PointwiseMode;
 
@@ -209,14 +373,22 @@ Status AddMatMulNode(
     return Status::Failure("MatMul/Gemm requires at least 2 input tensor attributes");
   }
 
+  auto a_attr = input_attrs[0];
+  auto b_attr = input_attrs[1];
+
+  // A and B must be tensors, not scalars.
+  if (IsScalarAttr(a_attr)) {
+    return Status::Failure("MatMul/Gemm input A must be a tensor, not a scalar");
+  }
+  if (IsScalarAttr(b_attr)) {
+    return Status::Failure("MatMul/Gemm input B must be a tensor, not a scalar");
+  }
+
   // Gemm-specific attributes (defaults match MatMul semantics)
   int64_t trans_a = GetIntAttrOrDefault(node, "transA", 0);
   int64_t trans_b = GetIntAttrOrDefault(node, "transB", 0);
   float alpha = GetFloatAttrOrDefault(node, "alpha", 1.0f);
   float beta = GetFloatAttrOrDefault(node, "beta", 1.0f);
-
-  auto a_attr = input_attrs[0];
-  auto b_attr = input_attrs[1];
 
   // Handle transpose by permuting dims and strides (zero-copy).
   // Gemm transA/transB swap the last two axes.
@@ -253,7 +425,7 @@ Status AddMatMulNode(
   // alpha scaling: result = alpha * (A @ B)
   if (alpha != 1.0f) {
     set_intermediate_dtype(result);
-    auto alpha_attr = CreateScalarTensorAttr(next_uid++, dtype, alpha, constants);
+    auto alpha_attr = CreateScalarTensorAttr(next_uid++, alpha);
     PointwiseAttributes pw;
     pw.set_mode(PointwiseMode::MUL).set_compute_data_type(dtype);
     result = graph.pointwise(result, alpha_attr, pw);
@@ -267,7 +439,7 @@ Status AddMatMulNode(
 
     // Scale bias if beta != 1.0
     if (beta != 1.0f) {
-      auto beta_attr = CreateScalarTensorAttr(next_uid++, dtype, beta, constants);
+      auto beta_attr = CreateScalarTensorAttr(next_uid++, beta);
       PointwiseAttributes pw;
       pw.set_mode(PointwiseMode::MUL).set_compute_data_type(dtype);
       bias = graph.pointwise(bias, beta_attr, pw);
@@ -290,13 +462,13 @@ Status AddNode(
     Ort::ConstNode node,
     const std::vector<TensorAttrPtr>& input_attrs,
     std::vector<TensorAttrPtr>& output_attrs,
-    int64_t& next_uid,
-    std::vector<ConstantScalar>& constants) {
+    int64_t& next_uid) {
   std::string op_type = node.GetOperatorType();
 
   if (op_type == "Conv") {
     TensorAttrPtr y_attr;
-    auto status = AddConvNode(graph, node, input_attrs, y_attr);
+    auto status =
+        AddConvNode(graph, node, input_attrs, y_attr, next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -305,7 +477,7 @@ Status AddNode(
   if (op_type == "MatMul" || op_type == "Gemm") {
     TensorAttrPtr y_attr;
     auto status = AddMatMulNode(
-        graph, node, input_attrs, y_attr, next_uid, constants);
+        graph, node, input_attrs, y_attr, next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -388,9 +560,11 @@ mlir::FailureOr<TensorAttrPtr> CreateTensorAttrFromMLIR(
 Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
                            mlir::Operation* op,
                            const std::vector<TensorAttrPtr>& input_attrs,
-                           TensorAttrPtr& output_attr) {
+                           TensorAttrPtr& output_attr,
+                           int64_t& next_uid) {
   using namespace hipdnn_frontend::graph;
   using hipdnn_frontend::ConvolutionMode;
+  using hipdnn_frontend::PointwiseMode;
 
   if (input_attrs.size() < 2) {
     return Status::Failure("Conv requires at least 2 input tensor attributes");
@@ -398,6 +572,14 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
 
   const auto& x_attr = input_attrs[0];
   const auto& w_attr = input_attrs[1];
+
+  // X and W must be tensors, not scalars.
+  if (IsScalarAttr(x_attr)) {
+    return Status::Failure("Conv input X must be a tensor, not a scalar");
+  }
+  if (IsScalarAttr(w_attr)) {
+    return Status::Failure("Conv filter W must be a tensor, not a scalar");
+  }
 
   std::vector<int64_t> pads = {0, 0, 0, 0};
   std::vector<int64_t> strides = {1, 1};
@@ -443,6 +625,19 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
 
   output_attr = graph.conv_fprop(x_attr, w_attr, conv_attrs);
 
+  // Optional bias: may be a scalar or a 1D [C_out] tensor.
+  if (input_attrs.size() >= 3) {
+    auto dtype = compute_dtype.value();
+    output_attr->set_data_type(dtype);
+    auto bias = input_attrs[2];
+    auto reshape_status = ReshapeBiasForConv(bias);
+    if (reshape_status.failed()) return reshape_status;
+
+    PointwiseAttributes add;
+    add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
+    output_attr = graph.pointwise(output_attr, bias, add);
+  }
+
   return Status::Success();
 }
 
@@ -453,8 +648,7 @@ Status AddMatMulNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
                              mlir::Operation* op,
                              const std::vector<TensorAttrPtr>& input_attrs,
                              TensorAttrPtr& output_attr,
-                             int64_t& next_uid,
-                             std::vector<ConstantScalar>& constants) {
+                             int64_t& next_uid) {
   using namespace hipdnn_frontend::graph;
   using hipdnn_frontend::PointwiseMode;
 
@@ -506,6 +700,14 @@ Status AddMatMulNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
     b_attr = input_attrs[1];
   }
 
+  // A and B must be tensors, not scalars.
+  if (IsScalarAttr(a_attr)) {
+    return Status::Failure("MatMul input A must be a tensor, not a scalar");
+  }
+  if (IsScalarAttr(b_attr)) {
+    return Status::Failure("MatMul input B must be a tensor, not a scalar");
+  }
+
   auto compute_dtype =
       GetComputeDataType(a_attr->get_data_type(), b_attr->get_data_type());
   if (!compute_dtype.has_value()) {
@@ -527,7 +729,7 @@ Status AddMatMulNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
   if (alpha != 1.0f) {
     set_intermediate_dtype(result);
     auto alpha_attr =
-        CreateScalarTensorAttr(next_uid++, dtype, alpha, constants);
+        CreateScalarTensorAttr(next_uid++, alpha);
     PointwiseAttributes pw;
     pw.set_mode(PointwiseMode::MUL).set_compute_data_type(dtype);
     result = graph.pointwise(result, alpha_attr, pw);
@@ -540,7 +742,7 @@ Status AddMatMulNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
 
     if (beta != 1.0f) {
       auto beta_scalar =
-          CreateScalarTensorAttr(next_uid++, dtype, beta, constants);
+          CreateScalarTensorAttr(next_uid++, beta);
       PointwiseAttributes pw;
       pw.set_mode(PointwiseMode::MUL).set_compute_data_type(dtype);
       bias = graph.pointwise(bias, beta_scalar, pw);
@@ -561,13 +763,13 @@ Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
                        mlir::Operation* op,
                        const std::vector<TensorAttrPtr>& input_attrs,
                        std::vector<TensorAttrPtr>& output_attrs,
-                       int64_t& next_uid,
-                       std::vector<ConstantScalar>& constants) {
+                       int64_t& next_uid) {
   llvm::StringRef op_name = op->getName().getStringRef();
 
   if (op_name == "torch.aten.convolution" || op_name == "torch.aten.conv2d") {
     TensorAttrPtr y_attr;
-    auto status = AddConvNodeFromMLIR(graph, op, input_attrs, y_attr);
+    auto status = AddConvNodeFromMLIR(graph, op, input_attrs, y_attr,
+                                      next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -577,7 +779,7 @@ Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
       op_name == "torch.aten.addmm") {
     TensorAttrPtr y_attr;
     auto status = AddMatMulNodeFromMLIR(graph, op, input_attrs, y_attr,
-                                        next_uid, constants);
+                                        next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -597,12 +799,6 @@ Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
 struct HipDNNGraphImpl {
   explicit HipDNNGraphImpl(hipdnnHandle_t handle) : handle_(handle) {}
 
-  ~HipDNNGraphImpl() {
-    if (constants_device_ptr_) {
-      (void)hipFree(constants_device_ptr_);
-    }
-  }
-
   Status Build(const std::vector<Ort::ConstValueInfo>& graph_inputs,
                const std::vector<Ort::ConstValueInfo>& graph_outputs,
                const std::vector<Ort::ConstNode>& nodes);
@@ -616,8 +812,6 @@ struct HipDNNGraphImpl {
   Status Execute(OrtKernelContext* kernel_ctx);
 
  private:
-  Status EnsureConstantsOnDevice();
-
   hipdnnHandle_t handle_;
 
   // hipDNN graph
@@ -626,7 +820,10 @@ struct HipDNNGraphImpl {
   // Workspace for hipDNN graph
   std::vector<char> workspace_;
 
-  // Graph input/output info
+  // Graph input/output info.
+  // input_uids_ maps each ORT input index to a hipDNN UID.  Embedded scalar
+  // constants get kEmbeddedScalar (-1) — they have no runtime data pointer.
+  static constexpr int64_t kEmbeddedScalar = -1;
   std::vector<int64_t> input_uids_;
   std::vector<int64_t> output_uids_;
   std::vector<std::vector<int64_t>> output_shapes_;
@@ -636,10 +833,6 @@ struct HipDNNGraphImpl {
 
   // UID counter for tensor attributes
   int64_t next_uid_{1};
-
-  // Scalar constants that need device memory (alpha, beta)
-  std::vector<ConstantScalar> constants_;
-  void* constants_device_ptr_ = nullptr;
 };
 
 Status HipDNNGraphImpl::Build(
@@ -660,9 +853,21 @@ Status HipDNNGraphImpl::Build(
 
   graph_ = std::make_unique<Graph>();
 
-  // Create TensorAttributes for all graph inputs and add to symbol table
+  // Create TensorAttributes for all graph inputs and add to symbol table.
+  // Scalar constant initializers (element count == 1) are embedded directly
+  // into the graph via the pass-by-value API instead of becoming runtime
+  // inputs.  This avoids requiring the caller to provide a device pointer
+  // for values that are known at graph-build time.
   input_uids_.reserve(graph_inputs.size());
   for (const auto& input : graph_inputs) {
+    if (auto attr = TryExtractScalarConstant(input)) {
+      // Embed the scalar directly via pass-by-value — no runtime input needed.
+      attr->set_uid(next_uid_++).set_name(input.GetName());
+      symbol_table_[input.GetName()] = attr;
+      input_uids_.push_back(kEmbeddedScalar);
+      continue;
+    }
+
     TensorAttrPtr attr;
     auto status = CreateTensorAttr(input, next_uid_++, attr);
     if (status.failed()) return status;
@@ -689,7 +894,7 @@ Status HipDNNGraphImpl::Build(
 
     // Add the node to hipDNN graph
     std::vector<TensorAttrPtr> output_attrs;
-    auto status = AddNode(*graph_, node, input_attrs, output_attrs, next_uid_, constants_);
+    auto status = AddNode(*graph_, node, input_attrs, output_attrs, next_uid_);
     if (status.failed()) return status;
 
     // Set UID, name on output TensorAttributes and add to symbol table
@@ -807,7 +1012,7 @@ Status HipDNNGraphImpl::Build(mlir::Region& region) {
 
     std::vector<TensorAttrPtr> output_attrs;
     auto status = AddNodeFromMLIR(*graph_, &op, input_attrs, output_attrs,
-                                  next_uid_, constants_);
+                                  next_uid_);
     if (status.failed()) return status;
 
     size_t tensor_result_idx = 0;
@@ -890,37 +1095,13 @@ Status HipDNNGraphImpl::Compile() {
   return Status::Success();
 }
 
-Status HipDNNGraphImpl::EnsureConstantsOnDevice() {
-  if (constants_device_ptr_) {
-    return Status::Success();
-  }
-  std::vector<float> host_data;
-  host_data.reserve(constants_.size());
-  for (const auto& c : constants_) {
-    host_data.push_back(c.value);
-  }
-  size_t buf_size = host_data.size() * sizeof(float);
-  hipError_t err = hipMalloc(&constants_device_ptr_, buf_size);
-  if (err != hipSuccess) {
-    return Status::Failure("hipMalloc for constants failed: " +
-                           std::string(hipGetErrorString(err)));
-  }
-  err = hipMemcpy(constants_device_ptr_, host_data.data(), buf_size,
-                  hipMemcpyHostToDevice);
-  if (err != hipSuccess) {
-    (void)hipFree(constants_device_ptr_);
-    constants_device_ptr_ = nullptr;
-    return Status::Failure("hipMemcpy for constants failed: " +
-                           std::string(hipGetErrorString(err)));
-  }
-  return Status::Success();
-}
-
 Status HipDNNGraphImpl::Execute(OrtKernelContext* kernel_ctx) {
   try {
     Ort::KernelContext context(kernel_ctx);
 
-    // Validate input/output counts match what we compiled for
+    // Validate input/output counts match what we compiled for.
+    // input_uids_ has one entry per ORT graph input (including embedded
+    // scalars marked with kEmbeddedScalar).
     if (context.GetInputCount() != input_uids_.size()) {
       return Status::Failure("Input count mismatch: expected " +
                              std::to_string(input_uids_.size()) + ", got " +
@@ -935,8 +1116,11 @@ Status HipDNNGraphImpl::Execute(OrtKernelContext* kernel_ctx) {
     // Build variant pack mapping UIDs to data pointers
     std::unordered_map<int64_t, void*> variant_pack;
 
-    // Map graph inputs to their UIDs
+    // Map graph inputs to their UIDs.
+    // Embedded scalars (kEmbeddedScalar) are skipped — their values are
+    // baked into the graph via pass-by-value.
     for (size_t i = 0; i < input_uids_.size(); ++i) {
+      if (input_uids_[i] == kEmbeddedScalar) continue;
       Ort::ConstValue input = context.GetInput(i);
       variant_pack[input_uids_[i]] = const_cast<void*>(input.GetTensorRawData());
     }
@@ -945,16 +1129,6 @@ Status HipDNNGraphImpl::Execute(OrtKernelContext* kernel_ctx) {
     for (size_t i = 0; i < output_uids_.size(); ++i) {
       Ort::UnownedValue output = context.GetOutput(i, output_shapes_[i]);
       variant_pack[output_uids_[i]] = output.GetTensorMutableRawData();
-    }
-
-    // Lazily allocate and copy scalar constants to device on first invocation
-    if (!constants_.empty()) {
-      auto status = EnsureConstantsOnDevice();
-      if (status.failed()) return status;
-      auto* base = static_cast<float*>(constants_device_ptr_);
-      for (size_t i = 0; i < constants_.size(); ++i) {
-        variant_pack[constants_[i].uid] = &base[i];
-      }
     }
 
     // Execute

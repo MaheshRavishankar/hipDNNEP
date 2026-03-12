@@ -70,6 +70,30 @@ static bool IsSupportedConv(Ort::ConstNode node) {
       return false;
     }
 
+    // Check bias (3rd input) if present.
+    // Supported shapes: [C_out] (per-channel) or scalar (element count == 1).
+    if (inputs.size() >= 3) {
+      ONNXTensorElementDataType b_type = GetTensorElementType(inputs[2]);
+      if (b_type != x_type) {
+        return false;  // Bias type must match input type
+      }
+
+      auto b_shape = GetTensorShape(inputs[2]);
+      if (!b_shape.has_value()) {
+        return false;
+      }
+
+      int64_t b_numel = 1;
+      for (int64_t d : b_shape.value()) {
+        b_numel *= d;
+      }
+
+      int64_t c_out = (*w_shape)[0];
+      if (b_numel != 1 && !(b_shape->size() == 1 && (*b_shape)[0] == c_out)) {
+        return false;  // Bias must be scalar or [C_out]
+      }
+    }
+
     return true;
 
   } catch (...) {
@@ -185,18 +209,44 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
       return false;  // K dimensions must match
     }
 
-    // Check C shape if present (must match output shape, no broadcasting)
+    // Check C shape if present.
+    // Supported shapes:
+    //   - scalar (element count == 1)
+    //   - 1-D [N] (broadcast along M dimension)
+    //   - 2-D [M, N] (exact match)
+    // Scalar constant initializers are embedded at graph-build time; runtime
+    // scalar inputs become [1]-shaped tensors that hipDNN broadcasts via
+    // pointwise ADD.
     if (inputs.size() == 3) {
       auto c_shape = GetTensorShape(inputs[2]);
-      if (!c_shape.has_value() || c_shape->size() != 2) {
+      if (!c_shape.has_value()) {
         return false;
       }
 
-      int64_t m = trans_a ? (*a_shape)[1] : (*a_shape)[0];
+      int64_t c_numel = 1;
+      for (int64_t d : c_shape.value()) {
+        c_numel *= d;
+      }
+
+      // Scalar bias is always supported.
+      if (c_numel == 1) {
+        return true;
+      }
+
       int64_t n = trans_b ? (*b_shape)[0] : (*b_shape)[1];
 
+      // 1-D bias [N] — broadcasts along the M dimension.
+      if (c_shape->size() == 1 && (*c_shape)[0] == n) {
+        return true;
+      }
+
+      // 2-D bias must match [M, N] exactly.
+      if (c_shape->size() != 2) {
+        return false;
+      }
+      int64_t m = trans_a ? (*a_shape)[1] : (*a_shape)[0];
       if ((*c_shape)[0] != m || (*c_shape)[1] != n) {
-        return false;  // C must match output shape (no broadcasting)
+        return false;
       }
     }
 

@@ -85,6 +85,56 @@ def create_gemm_model(
     return model
 
 
+def create_gemm_scalar_bias_model(
+    m: int,
+    k: int,
+    n: int,
+    bias_value: float = 0.5,
+    dtype: str = "float32",
+) -> onnx.ModelProto:
+    """Create a Gemm model with a scalar constant initializer as bias.
+
+    Y = A @ B + bias_value
+
+    The bias is a 1-element initializer (shape [1]) embedded in the graph.
+    This tests the scalar constant embedding path in HipDNNGraph::Build.
+    """
+    onnx_dtype = TensorProto.FLOAT if dtype == "float32" else TensorProto.FLOAT16
+    np_dtype = np.float32 if dtype == "float32" else np.float16
+
+    # Create input/output value infos
+    a = helper.make_tensor_value_info("A", onnx_dtype, [m, k])
+    b = helper.make_tensor_value_info("B", onnx_dtype, [k, n])
+    y = helper.make_tensor_value_info("Y", onnx_dtype, [m, n])
+
+    # Create scalar bias as a constant initializer (shape [1])
+    bias_data = np.array([bias_value], dtype=np_dtype)
+    bias_init = numpy_helper.from_array(bias_data, name="C")
+
+    # Create Gemm node
+    gemm_node = helper.make_node(
+        "Gemm",
+        inputs=["A", "B", "C"],
+        outputs=["Y"],
+        alpha=1.0,
+        beta=1.0,
+    )
+
+    # Graph: A and B are runtime inputs, C is an initializer
+    graph = helper.make_graph(
+        [gemm_node],
+        "gemm_scalar_bias_test",
+        [a, b],      # graph inputs (runtime)
+        [y],          # graph outputs
+        [bias_init],  # initializers
+    )
+
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+
+    return model
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate ONNX MatMul/Gemm test models")
     parser.add_argument("--output-dir", default=".", help="Output directory for models")
@@ -119,6 +169,11 @@ def main():
     print("Generating gemm_scaled_test.onnx...")
     gemm_scaled_model = create_gemm_model(m=64, k=128, n=32, alpha=0.5, beta=0.25, has_bias=True)
     onnx.save(gemm_scaled_model, f"{args.output_dir}/gemm_scaled_test.onnx")
+
+    # Generate Gemm with scalar bias initializer
+    print("Generating gemm_scalar_bias_test.onnx...")
+    gemm_scalar_bias_model = create_gemm_scalar_bias_model(m=64, k=128, n=32, bias_value=0.5)
+    onnx.save(gemm_scalar_bias_model, f"{args.output_dir}/gemm_scalar_bias_test.onnx")
 
     print("Done!")
 

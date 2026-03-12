@@ -38,6 +38,10 @@
 #define GEMM_SCALED_TEST_MODEL_PATH "./gemm_scaled_test.onnx"
 #endif
 
+#ifndef GEMM_SCALAR_BIAS_TEST_MODEL_PATH
+#define GEMM_SCALAR_BIAS_TEST_MODEL_PATH "./gemm_scalar_bias_test.onnx"
+#endif
+
 class HipDNNMatMulTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -409,6 +413,41 @@ TEST_F(HipDNNMatMulTest, GemmWithScaling) {
 
   std::cout << "Running Gemm with scaling using HipDNN EP..." << std::endl;
   auto gpu_output = RunWithHipDNNEp(GEMM_SCALED_TEST_MODEL_PATH, inputs, shapes, names, "Y");
+
+  CompareOutputs(cpu_output, gpu_output);
+}
+
+TEST_F(HipDNNMatMulTest, GemmWithScalarBias) {
+  ASSERT_TRUE(ep_available_) << "HipDNN EP not available";
+  ASSERT_TRUE(IsModelAvailable(GEMM_SCALAR_BIAS_TEST_MODEL_PATH))
+      << "Gemm scalar bias test model not available at: "
+      << GEMM_SCALAR_BIAS_TEST_MODEL_PATH;
+
+  // Model: Y = A @ B + 0.5  (scalar bias is a constant initializer)
+  // Only A and B are runtime inputs.
+  const int64_t m = 64, k = 128, n = 32;
+
+  std::vector<float> a_data(m * k);
+  std::vector<float> b_data(k * n);
+
+  for (size_t i = 0; i < a_data.size(); ++i) {
+    a_data[i] = static_cast<float>(i % 10) / 10.0f;
+  }
+  for (size_t i = 0; i < b_data.size(); ++i) {
+    b_data[i] = static_cast<float>((i + 3) % 10) / 10.0f;
+  }
+
+  std::vector<std::vector<float>> inputs = {a_data, b_data};
+  std::vector<std::vector<int64_t>> shapes = {{m, k}, {k, n}};
+  std::vector<const char*> names = {"A", "B"};
+
+  std::cout << "Running Gemm with scalar bias using CPU EP..." << std::endl;
+  auto cpu_output =
+      RunWithCpuEp(GEMM_SCALAR_BIAS_TEST_MODEL_PATH, inputs, shapes, names, "Y");
+
+  std::cout << "Running Gemm with scalar bias using HipDNN EP..." << std::endl;
+  auto gpu_output =
+      RunWithHipDNNEp(GEMM_SCALAR_BIAS_TEST_MODEL_PATH, inputs, shapes, names, "Y");
 
   CompareOutputs(cpu_output, gpu_output);
 }
