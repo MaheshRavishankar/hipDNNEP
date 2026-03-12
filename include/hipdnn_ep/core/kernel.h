@@ -5,6 +5,7 @@
 
 #include "hipdnn_ep/blas_graph/blas_graph.h"
 #include "hipdnn_ep/hipdnn_graph/hipdnn_graph.h"
+#include "hipdnn_ep/reduction/reduction_graph.h"
 #include "hipdnn_ep/torch_mlir_graph/ir_builder.h"
 
 #include <memory>
@@ -78,6 +79,9 @@ struct Kernel {
 
   // hipBLAS-LT support (nullptr if unavailable or not used)
   std::unique_ptr<BlasGraph> blas_graph_;
+
+  // GPU reduction kernels (nullptr if not a reduction graph)
+  std::unique_ptr<ReductionGraph> reduction_graph_;
 
   // Torch-MLIR support
   std::unique_ptr<IRBuilder> ir_builder_;

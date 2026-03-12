@@ -308,6 +308,56 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
   }
 }
 
+// Check if a reduction op (ReduceSum, ReduceMax, ReduceMin) is supported by
+// this EP.  The implementation uses a dedicated HIP kernel rather than the
+// hipDNN graph API, so no hipDNN-specific constraints apply.
+static bool IsSupportedReduction(Ort::ConstNode node) {
+  try {
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    // At least one input (X) and exactly one output.
+    if (inputs.empty() || outputs.size() != 1) {
+      return false;
+    }
+
+    // Only float32 for now.
+    ONNXTensorElementDataType x_type = GetTensorElementType(inputs[0]);
+    if (x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      return false;
+    }
+
+    ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
+    if (y_type != x_type) {
+      return false;
+    }
+
+    // Input and output must have static shapes.
+    auto x_shape = GetTensorShape(inputs[0]);
+    if (!x_shape.has_value()) {
+      return false;
+    }
+
+    auto y_shape = GetTensorShape(outputs[0]);
+    if (!y_shape.has_value()) {
+      return false;
+    }
+
+    // If axes are provided as a second input (opset >= 13), they must be a
+    // constant initializer so we can read them at graph-partitioning time.
+    if (inputs.size() >= 2) {
+      if (!inputs[1].IsConstantInitializer()) {
+        return false;  // Dynamic axes not supported
+      }
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if an op is supported by this EP
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
@@ -331,6 +381,13 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   if (op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
       op_type == "Div") {
     return IsSupportedPointwise(node);
+  }
+
+  // Reduction ops.  Keep this list in sync with GetReductionMode()
+  // in src/reduction/reduction_graph.cc.
+  if (op_type == "ReduceSum" || op_type == "ReduceMax" ||
+      op_type == "ReduceMin") {
+    return IsSupportedReduction(node);
   }
 
   return false;

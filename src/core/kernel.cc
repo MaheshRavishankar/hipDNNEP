@@ -15,6 +15,22 @@
 
 namespace hipdnn_ep {
 
+namespace {
+
+// Return true if all nodes in the graph are reduction operations.
+static bool IsReductionGraph(const std::vector<Ort::ConstNode>& nodes) {
+  if (nodes.empty()) return false;
+  for (const auto& node : nodes) {
+    std::string op = node.GetOperatorType();
+    if (op != "ReduceSum" && op != "ReduceMax" && op != "ReduceMin") {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
 //
 // Kernel implementation
 //
@@ -71,6 +87,17 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
   }
 #endif
 
+  // Reduction ops use a dedicated HIP kernel (the hipDNN frontend graph API
+  // does not yet expose a reduction node).
+  if (IsReductionGraph(nodes)) {
+    reduction_graph_ = std::make_unique<ReductionGraph>();
+    Status build_status = reduction_graph_->Build(graph_inputs, graph_outputs, nodes);
+    if (build_status.failed()) {
+      return HIPDNN_STATUS_TO_ORT(ort_api_, build_status);
+    }
+    return HIPDNN_STATUS_TO_ORT(ort_api_, reduction_graph_->Compile());
+  }
+
   // Standard hipDNN graph path
   if (config_.useHipDNN()) {
     hipdnn_graph_ = std::make_unique<HipDNNGraph>(config_.getHipDNNHandle());
@@ -87,6 +114,9 @@ OrtStatus* Kernel::BuildAndCompile(Ort::ConstGraph graph) {
 OrtStatus* Kernel::Execute(OrtKernelContext* kernel_ctx) {
   if (blas_graph_) {
     return blas_graph_->Execute(kernel_ctx);
+  }
+  if (reduction_graph_) {
+    return HIPDNN_STATUS_TO_ORT(ort_api_, reduction_graph_->Execute(kernel_ctx));
   }
   if (hipdnn_graph_) {
     return HIPDNN_STATUS_TO_ORT(ort_api_, hipdnn_graph_->Execute(kernel_ctx));
