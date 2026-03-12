@@ -269,11 +269,17 @@ static bool IsSupportedUnaryPointwise(Ort::ConstNode node) {
       return false;
     }
 
-    // Check data types - input and output must share the same element type.
+    // Check data types - input and output must share the same element type,
+    // and must be a supported floating-point type.
     ONNXTensorElementDataType x_type = GetTensorElementType(inputs[0]);
     ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
 
     if (x_type != y_type) {
+      return false;
+    }
+
+    if (x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
       return false;
     }
 

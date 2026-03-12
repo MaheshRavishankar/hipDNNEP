@@ -48,22 +48,31 @@ std::optional<hipdnn_frontend::DataType> ToHipDNNDataType(ONNXTensorElementDataT
   }
 }
 
+// Check if a hipDNN data type is a supported floating-point type.
+static bool IsFloatDataType(hipdnn_frontend::DataType dtype) {
+  return dtype == hipdnn_frontend::DataType::FLOAT ||
+         dtype == hipdnn_frontend::DataType::HALF;
+}
+
 // Determine compute data type based on input data types
 // For float types with precision <= float32, compute in float32
 std::optional<hipdnn_frontend::DataType> GetComputeDataType(
     hipdnn_frontend::DataType x_dtype,
     hipdnn_frontend::DataType w_dtype) {
-  using hipdnn_frontend::DataType;
-
-  // Both must be float types (FLOAT or HALF)
-  bool x_is_float = (x_dtype == DataType::FLOAT || x_dtype == DataType::HALF);
-  bool w_is_float = (w_dtype == DataType::FLOAT || w_dtype == DataType::HALF);
-
-  if (x_is_float && w_is_float) {
+  if (IsFloatDataType(x_dtype) && IsFloatDataType(w_dtype)) {
     // Use float32 for compute when inputs are float types with precision <= float32
-    return DataType::FLOAT;
+    return hipdnn_frontend::DataType::FLOAT;
   }
 
+  return std::nullopt;
+}
+
+// Determine compute data type for unary operations.
+static std::optional<hipdnn_frontend::DataType> GetUnaryComputeDataType(
+    hipdnn_frontend::DataType x_dtype) {
+  if (IsFloatDataType(x_dtype)) {
+    return hipdnn_frontend::DataType::FLOAT;
+  }
   return std::nullopt;
 }
 
@@ -480,13 +489,14 @@ static std::optional<hipdnn_frontend::PointwiseMode> GetPointwiseMode(
   return std::nullopt;
 }
 
-// Map ONNX unary pointwise op name to hipDNN PointwiseMode.
-// Keep this list in sync with the unary pointwise dispatch in
-// src/core/ep.cc (IsSupportedOp).
+// Map canonical unary pointwise op name to hipDNN PointwiseMode.
+// This is the single source of truth for unary pointwise dispatch;
+// the MLIR path strips the "torch.aten." prefix before calling this.
+// Keep the op names in sync with ep.cc (IsSupportedOp).
 static std::optional<hipdnn_frontend::PointwiseMode> GetUnaryPointwiseMode(
-    const std::string& op_type) {
+    const std::string& op_name) {
   using hipdnn_frontend::PointwiseMode;
-  if (op_type == "Sigmoid") return PointwiseMode::SIGMOID_FWD;
+  if (op_name == "Sigmoid") return PointwiseMode::SIGMOID_FWD;
   return std::nullopt;
 }
 
@@ -545,16 +555,13 @@ static Status AddUnaryPointwiseNode(
 
   const auto& x_attr = input_attrs[0];
 
-  // For unary ops, compute type is derived from the single input
-  auto x_dtype = x_attr->get_data_type();
-  bool is_float = (x_dtype == hipdnn_frontend::DataType::FLOAT ||
-                   x_dtype == hipdnn_frontend::DataType::HALF);
-  if (!is_float) {
+  auto compute_dtype = GetUnaryComputeDataType(x_attr->get_data_type());
+  if (!compute_dtype.has_value()) {
     return Status::Failure("Unsupported data type for unary pointwise compute");
   }
 
   PointwiseAttributes pw;
-  pw.set_mode(mode.value()).set_compute_data_type(hipdnn_frontend::DataType::FLOAT);
+  pw.set_mode(mode.value()).set_compute_data_type(compute_dtype.value());
   output_attr = graph.pointwise(x_attr, pw);
 
   return Status::Success();
@@ -889,12 +896,17 @@ bool IsFusilliCompatibleMLIROp(llvm::StringRef op_name) {
          op_name == "torch.aten.matmul" || op_name == "torch.aten.addmm";
 }
 
-// Map torch.aten unary op name to hipDNN PointwiseMode.
+// Map torch.aten unary op name to hipDNN PointwiseMode by stripping
+// the "torch.aten." prefix and delegating to GetUnaryPointwiseMode.
 static std::optional<hipdnn_frontend::PointwiseMode> GetUnaryPointwiseModeFromMLIR(
     llvm::StringRef op_name) {
-  using hipdnn_frontend::PointwiseMode;
-  if (op_name == "torch.aten.sigmoid") return PointwiseMode::SIGMOID_FWD;
-  return std::nullopt;
+  if (!op_name.consume_front("torch.aten.")) return std::nullopt;
+  // Capitalize the first letter to match ONNX op names (e.g., "sigmoid" -> "Sigmoid").
+  std::string canonical = op_name.str();
+  if (!canonical.empty()) {
+    canonical[0] = std::toupper(static_cast<unsigned char>(canonical[0]));
+  }
+  return GetUnaryPointwiseMode(canonical);
 }
 
 // Add a unary pointwise operation from MLIR (e.g., torch.aten.sigmoid)
@@ -916,15 +928,14 @@ static Status AddUnaryPointwiseNodeFromMLIR(
   }
 
   const auto& x_attr = input_attrs[0];
-  auto x_dtype = x_attr->get_data_type();
-  bool is_float = (x_dtype == hipdnn_frontend::DataType::FLOAT ||
-                   x_dtype == hipdnn_frontend::DataType::HALF);
-  if (!is_float) {
+
+  auto compute_dtype = GetUnaryComputeDataType(x_attr->get_data_type());
+  if (!compute_dtype.has_value()) {
     return Status::Failure("Unsupported data type for unary pointwise compute");
   }
 
   PointwiseAttributes pw;
-  pw.set_mode(mode.value()).set_compute_data_type(hipdnn_frontend::DataType::FLOAT);
+  pw.set_mode(mode.value()).set_compute_data_type(compute_dtype.value());
   output_attr = graph.pointwise(x_attr, pw);
 
   return Status::Success();
