@@ -7,6 +7,7 @@
 #include <hipdnn_backend.h>
 #include <hipdnn_frontend.hpp>
 
+#include <cassert>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -24,8 +25,13 @@ namespace hipdnn_ep {
 
 namespace {
 
-// Helper function to compute strides from shape (NCHW layout)
-std::vector<int64_t> ComputeStrides(const std::vector<int64_t>& shape) {
+// Layout for 4D convolution tensors.
+// NCHW: row-major / channels-first (default)
+// NHWC: channels-last
+enum class ConvLayout { NCHW, NHWC };
+
+// Compute row-major strides from shape (NCHW / default layout).
+static std::vector<int64_t> ComputeStrides(const std::vector<int64_t>& shape) {
   std::vector<int64_t> strides(shape.size());
   int64_t stride = 1;
   for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
@@ -33,6 +39,32 @@ std::vector<int64_t> ComputeStrides(const std::vector<int64_t>& shape) {
     stride *= shape[i];
   }
   return strides;
+}
+
+// Compute NHWC (channels-last) strides for a 4D shape labeled [N, C, H, W].
+// hipDNN always uses the NCHW dimension labeling, so a tensor with physical
+// NHWC layout is expressed via strides that make the C dimension the
+// fastest-varying and N the slowest.
+//
+// For a [N, C, H, W] tensor stored in NHWC order in memory the strides are:
+//   N stride = H * W * C
+//   C stride = 1              (fastest-varying)
+//   H stride = W * C
+//   W stride = C
+static std::vector<int64_t> ComputeNHWCStrides(const std::vector<int64_t>& shape) {
+  assert(shape.size() == 4 && "ComputeNHWCStrides requires a 4D shape");
+  int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+  (void)N;
+  return {H * W * C, 1, W * C, C};
+}
+
+// Compute strides for a 4D shape according to the given layout.
+static std::vector<int64_t> ComputeConvStrides(
+    const std::vector<int64_t>& shape, ConvLayout layout) {
+  if (layout == ConvLayout::NHWC) {
+    return ComputeNHWCStrides(shape);
+  }
+  return ComputeStrides(shape);
 }
 
 // Convert ONNX tensor element data type to hipDNN data type
@@ -196,11 +228,13 @@ static TensorAttrPtr TryExtractScalarConstant(Ort::ConstValueInfo value_info) {
   return attr;
 }
 
-// Create TensorAttributes from a ConstValueInfo
+// Create TensorAttributes from a ConstValueInfo.
+// When layout is NHWC and the shape is 4D, NHWC strides are used.
 Status CreateTensorAttr(
     Ort::ConstValueInfo value_info,
     int64_t uid,
-    TensorAttrPtr& out_attr) {
+    TensorAttrPtr& out_attr,
+    ConvLayout layout = ConvLayout::NCHW) {
   using hipdnn_frontend::graph::TensorAttributes;
 
   std::string name = value_info.GetName();
@@ -215,29 +249,32 @@ Status CreateTensorAttr(
     return Status::Failure("Unsupported data type for value: " + name);
   }
 
+  auto strides = (layout == ConvLayout::NHWC && shape->size() == 4)
+                     ? ComputeNHWCStrides(shape.value())
+                     : ComputeStrides(shape.value());
+
   out_attr = std::make_shared<TensorAttributes>();
   out_attr->set_uid(uid)
       .set_name(name)
       .set_data_type(dtype.value())
       .set_dim(shape.value())
-      .set_stride(ComputeStrides(shape.value()));
+      .set_stride(strides);
 
   return Status::Success();
 }
 
-// Reshape a 1D bias [C] to NCHW-broadcast shape [1, C, 1, 1] so that hipDNN
-// pointwise ADD can broadcast it over the 4D conv output.
+// Reshape a 1D bias [C] to a 4D broadcast shape compatible with the given
+// layout so that hipDNN pointwise ADD can broadcast it over the conv output.
+//
+//   NCHW -> [1, C, 1, 1]   (C along axis 1)
+//   NHWC -> [1, C, 1, 1]   with NHWC strides [C, 1, C, C]
 //
 // Accepted inputs:
 //   - pass-by-value scalar   -> left unchanged (broadcasts naturally)
-//   - 1D [C]                 -> reshaped to [1, C, 1, 1]
+//   - 1D [C]                 -> reshaped according to layout
 //   - 4D (already broadcast) -> left unchanged
-//
-// This function assumes NCHW layout.  The EP currently only supports NCHW
-// convolutions (strides are computed via ComputeStrides which produces
-// row-major / NCHW order).  NHWC would require [1, 1, 1, C] instead.
-// TODO: Support NHWC layout when the EP adds channel-last convolutions.
-static Status ReshapeBiasForConv(const TensorAttrPtr& bias) {
+static Status ReshapeBiasForConv(const TensorAttrPtr& bias,
+                                 ConvLayout layout) {
   // Pass-by-value scalars have dim={1} set by set_value(); leave them alone.
   if (bias->get_pass_by_value()) {
     return Status::Success();
@@ -251,9 +288,11 @@ static Status ReshapeBiasForConv(const TensorAttrPtr& bias) {
   }
 
   if (bias_dim.size() == 1) {
-    // 1D bias [C] -> NCHW broadcast shape [1, C, 1, 1].
-    bias->set_dim({1, bias_dim[0], 1, 1});
-    bias->set_stride({bias_dim[0], 1, 1, 1});
+    int64_t C = bias_dim[0];
+    // hipDNN labels dimensions as [N, C, H, W].  We set dim to [1, C, 1, 1]
+    // for both layouts; the strides determine the physical layout.
+    bias->set_dim({1, C, 1, 1});
+    bias->set_stride(ComputeConvStrides({1, C, 1, 1}, layout));
     return Status::Success();
   }
 
@@ -262,11 +301,32 @@ static Status ReshapeBiasForConv(const TensorAttrPtr& bias) {
       "; expected 1D [C] or 4D [1,C,1,1]");
 }
 
+// Detect the convolution layout from the input tensor strides.
+// If the input X has NHWC strides (C stride == 1 and N stride == H*W*C),
+// the layout is NHWC.  Otherwise default to NCHW.
+static ConvLayout DetectConvLayout(const TensorAttrPtr& x_attr) {
+  auto dims = x_attr->get_dim();
+  auto strides = x_attr->get_stride();
+  if (dims.size() == 4 && strides.size() == 4) {
+    // NHWC strides for [N, C, H, W]: N=H*W*C, C=1, H=W*C, W=C
+    int64_t C = dims[1], H = dims[2], W = dims[3];
+    if (strides[1] == 1 && strides[3] == C && strides[2] == W * C &&
+        strides[0] == H * W * C) {
+      return ConvLayout::NHWC;
+    }
+  }
+  return ConvLayout::NCHW;
+}
+
 // Add Conv operation to hipDNN graph
 // Takes input tensor attributes (X, W, optional B), returns output tensor
 // attribute (Y).  B may be a scalar (embedded constant) or a 1D per-channel
 // tensor; both are handled via a pointwise ADD that broadcasts over the
 // convolution output.
+//
+// The layout (NCHW or NHWC) is detected from the input tensor strides and
+// propagated to all tensors (weights, bias, output) so that hipDNN uses the
+// correct memory layout.
 Status AddConvNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
@@ -290,6 +350,15 @@ Status AddConvNode(
   }
   if (IsScalarAttr(w_attr)) {
     return Status::Failure("Conv filter W must be a tensor, not a scalar");
+  }
+
+  // Detect layout from input strides.
+  ConvLayout layout = DetectConvLayout(x_attr);
+
+  // When the input is NHWC, ensure the filter also uses NHWC strides.
+  // The filter dim labeling stays [K, C, R, S] per hipDNN convention.
+  if (layout == ConvLayout::NHWC) {
+    w_attr->set_stride(ComputeNHWCStrides(w_attr->get_dim()));
   }
 
   // Extract Conv attributes
@@ -328,7 +397,7 @@ Status AddConvNode(
     auto dtype = compute_dtype.value();
     output_attr->set_data_type(dtype);
     auto bias = input_attrs[2];
-    auto reshape_status = ReshapeBiasForConv(bias);
+    auto reshape_status = ReshapeBiasForConv(bias, layout);
     if (reshape_status.failed()) return reshape_status;
 
     PointwiseAttributes add;
@@ -514,14 +583,16 @@ Status AddPointwiseNode(
   return Status::Success();
 }
 
-// Dispatch to appropriate Add*Node based on op_type
-// Takes input tensor attributes, returns output tensor attributes
+// Dispatch to appropriate Add*Node based on op_type.
+// Takes input tensor attributes, returns output tensor attributes and the
+// layout used by the node (NCHW for non-conv ops).
 Status AddNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
     const std::vector<TensorAttrPtr>& input_attrs,
     std::vector<TensorAttrPtr>& output_attrs,
-    int64_t& next_uid) {
+    int64_t& next_uid,
+    ConvLayout& out_layout) {
   std::string op_type = node.GetOperatorType();
 
   if (op_type == "Conv") {
@@ -530,8 +601,14 @@ Status AddNode(
         AddConvNode(graph, node, input_attrs, y_attr, next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
+    // Detect layout from the input so the caller can set output strides.
+    out_layout = (input_attrs.size() >= 1)
+                     ? DetectConvLayout(input_attrs[0])
+                     : ConvLayout::NCHW;
     return Status::Success();
   }
+
+  out_layout = ConvLayout::NCHW;
 
   if (op_type == "MatMul" || op_type == "Gemm") {
     TensorAttrPtr y_attr;
@@ -600,12 +677,14 @@ mlir::FailureOr<TensorInfo> GetTensorInfo(mlir::Location loc, mlir::Type type) {
   return info;
 }
 
-// Create TensorAttributes from MLIR type
+// Create TensorAttributes from MLIR type.
+// When layout is NHWC and the shape is 4D, NHWC strides are used.
 mlir::FailureOr<TensorAttrPtr> CreateTensorAttrFromMLIR(
     mlir::Location loc,
     mlir::Type type,
     int64_t uid,
-    const std::string& name) {
+    const std::string& name,
+    ConvLayout layout = ConvLayout::NCHW) {
   using hipdnn_frontend::graph::TensorAttributes;
 
   auto info = GetTensorInfo(loc, type);
@@ -613,12 +692,16 @@ mlir::FailureOr<TensorAttrPtr> CreateTensorAttrFromMLIR(
     return mlir::failure();
   }
 
+  auto strides = (layout == ConvLayout::NHWC && info->shape.size() == 4)
+                     ? ComputeNHWCStrides(info->shape)
+                     : ComputeStrides(info->shape);
+
   auto attr = std::make_shared<TensorAttributes>();
   attr->set_uid(uid)
       .set_name(name)
       .set_data_type(info->dtype)
       .set_dim(info->shape)
-      .set_stride(ComputeStrides(info->shape));
+      .set_stride(strides);
 
   return attr;
 }
@@ -646,6 +729,14 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
   }
   if (IsScalarAttr(w_attr)) {
     return Status::Failure("Conv filter W must be a tensor, not a scalar");
+  }
+
+  // Detect layout from input strides.
+  ConvLayout layout = DetectConvLayout(x_attr);
+
+  // When the input is NHWC, ensure the filter also uses NHWC strides.
+  if (layout == ConvLayout::NHWC) {
+    w_attr->set_stride(ComputeNHWCStrides(w_attr->get_dim()));
   }
 
   std::vector<int64_t> pads = {0, 0, 0, 0};
@@ -697,7 +788,7 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
     auto dtype = compute_dtype.value();
     output_attr->set_data_type(dtype);
     auto bias = input_attrs[2];
-    auto reshape_status = ReshapeBiasForConv(bias);
+    auto reshape_status = ReshapeBiasForConv(bias, layout);
     if (reshape_status.failed()) return reshape_status;
 
     PointwiseAttributes add;
@@ -836,11 +927,14 @@ bool IsFusilliCompatibleMLIROp(llvm::StringRef op_name) {
 }
 
 // Dispatch MLIR op to appropriate Add*Node function
+// Dispatch MLIR op to appropriate Add*Node function.
+// Also returns the layout used by the node via out_layout.
 Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
                        mlir::Operation* op,
                        const std::vector<TensorAttrPtr>& input_attrs,
                        std::vector<TensorAttrPtr>& output_attrs,
-                       int64_t& next_uid) {
+                       int64_t& next_uid,
+                       ConvLayout& out_layout) {
   llvm::StringRef op_name = op->getName().getStringRef();
 
   if (op_name == "torch.aten.convolution" || op_name == "torch.aten.conv2d") {
@@ -849,8 +943,13 @@ Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
                                       next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
+    out_layout = (input_attrs.size() >= 1)
+                     ? DetectConvLayout(input_attrs[0])
+                     : ConvLayout::NCHW;
     return Status::Success();
   }
+
+  out_layout = ConvLayout::NCHW;
 
   if (op_name == "torch.aten.mm" || op_name == "torch.aten.matmul" ||
       op_name == "torch.aten.addmm") {
@@ -981,7 +1080,9 @@ Status HipDNNGraphImpl::Build(
 
     // Add the node to hipDNN graph
     std::vector<TensorAttrPtr> output_attrs;
-    auto status = AddNode(*graph_, node, input_attrs, output_attrs, next_uid_);
+    ConvLayout node_layout = ConvLayout::NCHW;
+    auto status = AddNode(*graph_, node, input_attrs, output_attrs, next_uid_,
+                          node_layout);
     if (status.failed()) return status;
 
     // Set UID, name on output TensorAttributes and add to symbol table
@@ -1007,7 +1108,11 @@ Status HipDNNGraphImpl::Build(
         return Status::Failure("Output must have static shape: " + name);
       }
 
-      output_attrs[i]->set_uid(next_uid_++).set_name(name).set_data_type(dtype.value()).set_dim(shape.value()).set_stride(ComputeStrides(shape.value()));
+      // Use the layout detected by the node builder for 4D outputs.
+      auto out_strides = (node_layout == ConvLayout::NHWC && shape->size() == 4)
+                             ? ComputeNHWCStrides(shape.value())
+                             : ComputeStrides(shape.value());
+      output_attrs[i]->set_uid(next_uid_++).set_name(name).set_data_type(dtype.value()).set_dim(shape.value()).set_stride(out_strides);
       symbol_table_[name] = output_attrs[i];
     }
   }
@@ -1103,8 +1208,9 @@ Status HipDNNGraphImpl::Build(mlir::Region& region) {
     }
 
     std::vector<TensorAttrPtr> output_attrs;
+    ConvLayout node_layout = ConvLayout::NCHW;
     auto status = AddNodeFromMLIR(*graph_, &op, input_attrs, output_attrs,
-                                  next_uid_);
+                                  next_uid_, node_layout);
     if (status.failed()) return status;
 
     size_t tensor_result_idx = 0;
@@ -1121,11 +1227,15 @@ Status HipDNNGraphImpl::Build(mlir::Region& region) {
       if (mlir::failed(info)) {
         return Status::Failure("Failed to get tensor info for op result");
       }
+      auto out_strides =
+          (node_layout == ConvLayout::NHWC && info->shape.size() == 4)
+              ? ComputeNHWCStrides(info->shape)
+              : ComputeStrides(info->shape);
       attr->set_uid(next_uid_++)
           .set_name("v" + std::to_string(attr->get_uid()))
           .set_data_type(info->dtype)
           .set_dim(info->shape)
-          .set_stride(ComputeStrides(info->shape));
+          .set_stride(out_strides);
       value_map[result] = attr;
     }
   }
