@@ -16,14 +16,25 @@ except ImportError:
 
 def create_pointwise_model(
     op_type="Mul",
-    shape=(1, 4, 8, 8),
+    a_shape=(1, 4, 8, 8),
+    b_shape=None,
     output_file="pointwise_test.onnx",
 ):
-    """Create a pointwise binary op model: Y = op(A, B)."""
+    """Create a pointwise binary op model: Y = op(A, B).
 
-    A = helper.make_tensor_value_info("A", TensorProto.FLOAT, list(shape))
-    B = helper.make_tensor_value_info("B", TensorProto.FLOAT, list(shape))
-    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, list(shape))
+    When b_shape differs from a_shape, ONNX broadcasting determines Y's shape.
+    """
+    if b_shape is None:
+        b_shape = a_shape
+
+    # Compute broadcast output shape via numpy
+    a_dummy = np.empty(a_shape)
+    b_dummy = np.empty(b_shape)
+    y_shape = np.broadcast_shapes(a_dummy.shape, b_dummy.shape)
+
+    A = helper.make_tensor_value_info("A", TensorProto.FLOAT, list(a_shape))
+    B = helper.make_tensor_value_info("B", TensorProto.FLOAT, list(b_shape))
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, list(y_shape))
 
     node = helper.make_node(
         op_type,
@@ -46,7 +57,7 @@ def create_pointwise_model(
     onnx.checker.check_model(model)
     onnx.save(model, output_file)
     print(f"Saved {op_type} model to {output_file}")
-    print(f"  Shape: {list(shape)}")
+    print(f"  A shape: {list(a_shape)}, B shape: {list(b_shape)}, Y shape: {list(y_shape)}")
 
     return model
 
@@ -58,12 +69,16 @@ if __name__ == "__main__":
     parser.add_argument("--op", choices=["Mul", "Sub", "Add", "Div"], default="Mul")
     parser.add_argument("--output", "-o", default="pointwise_test.onnx")
     parser.add_argument(
-        "--shape", type=int, nargs="+", default=[1, 4, 8, 8]
+        "--a-shape", type=int, nargs="+", default=[1, 4, 8, 8]
+    )
+    parser.add_argument(
+        "--b-shape", type=int, nargs="+", default=None
     )
     args = parser.parse_args()
 
     create_pointwise_model(
         op_type=args.op,
-        shape=tuple(args.shape),
+        a_shape=tuple(args.a_shape),
+        b_shape=tuple(args.b_shape) if args.b_shape else None,
         output_file=args.output,
     )

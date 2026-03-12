@@ -54,5 +54,24 @@ foreach(_op IN LISTS _pw_ops)
   )
 endforeach()
 
+# Generate Pointwise scalar-input test models (B is scalar [1])
+foreach(_op IN LISTS _pw_ops)
+  string(TOLOWER "${_op}" _op_lower)
+  set(_model "${CMAKE_CURRENT_BINARY_DIR}/${_op_lower}_scalar_test.onnx")
+  add_custom_command(
+    OUTPUT ${_model}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_pointwise_model.py
+            --op ${_op} --a-shape 1 4 8 8 --b-shape 1 --output ${_model}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_pointwise_model.py
+    COMMENT "Generating ${_op} scalar test model"
+    VERBATIM
+  )
+  list(APPEND _pw_models ${_model})
+  string(TOUPPER "${_op}" _op_upper)
+  target_compile_definitions(hipdnn_ep_tests PRIVATE
+    ${_op_upper}_SCALAR_TEST_MODEL_PATH="${_model}"
+  )
+endforeach()
+
 add_custom_target(generate_pointwise_test_models DEPENDS ${_pw_models})
 add_dependencies(hipdnn_ep_tests generate_pointwise_test_models)
