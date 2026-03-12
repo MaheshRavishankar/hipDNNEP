@@ -9,6 +9,7 @@
 
 #include "hipdnn_ep/blas_graph/blas_graph.h"
 
+#include <algorithm>
 #include <hipdnn_backend.h>
 
 namespace hipdnn_ep {
@@ -257,6 +258,56 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
   }
 }
 
+// Check if a pointwise binary op (Mul, Sub, Add, Div) is supported by this EP
+static bool IsSupportedPointwise(Ort::ConstNode node) {
+  try {
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    // Pointwise binary ops require exactly 2 inputs and 1 output
+    if (inputs.size() != 2 || outputs.size() != 1) {
+      return false;
+    }
+
+    // Check data types - all inputs and output must share the same element type.
+    // The hipDNN backend handles type compatibility, so we accept any ONNX type.
+    ONNXTensorElementDataType a_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType b_type = GetTensorElementType(inputs[1]);
+    ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
+
+    if (a_type != b_type || a_type != y_type) {
+      return false;
+    }
+
+    // Both inputs must have static shapes
+    auto a_shape = GetTensorShape(inputs[0]);
+    auto b_shape = GetTensorShape(inputs[1]);
+
+    if (!a_shape.has_value() || !b_shape.has_value()) {
+      return false;  // Dynamic shapes not supported yet
+    }
+
+    // Check shape compatibility.  We support:
+    //   - Exact shape match
+    //   - One or both inputs are scalar (rank 0, or every dim is 1)
+    // General broadcasting is not supported.
+    auto is_scalar = [](const std::vector<int64_t>& shape) {
+      return shape.empty() ||
+             std::all_of(shape.begin(), shape.end(),
+                         [](int64_t d) { return d == 1; });
+    };
+
+    if (*a_shape != *b_shape && !is_scalar(*a_shape) && !is_scalar(*b_shape)) {
+      return false;
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if an op is supported by this EP
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
@@ -275,7 +326,13 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
     }
   }
 
-  // Add more operations here as we implement them
+  // Pointwise binary ops.  Keep this list in sync with GetPointwiseMode()
+  // in src/hipdnn_graph/hipdnn_graph.cc.
+  if (op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
+      op_type == "Div") {
+    return IsSupportedPointwise(node);
+  }
+
   return false;
 }
 
