@@ -165,6 +165,89 @@ def create_conv_bias_model(
     return model
 
 
+def create_conv_nhwc_model(
+    batch=1,
+    in_channels=1,
+    out_channels=1,
+    height=8,
+    width=8,
+    kernel_h=3,
+    kernel_w=3,
+    pad_h=1,
+    pad_w=1,
+    stride_h=1,
+    stride_w=1,
+    output_file="conv_nhwc_test.onnx"
+):
+    """Create a Conv model with channels_last=1 (NHWC layout).
+
+    The input and output use NHWC shape ordering [N, H, W, C].
+    The weight remains in NCHW order [K, C, kH, kW] as ORT's layout
+    transformer does not transpose the filter.
+    The Conv node carries a ``channels_last=1`` integer attribute so the
+    EP detects NHWC layout.
+    """
+
+    # Input in NHWC order
+    X = helper.make_tensor_value_info('X', TensorProto.FLOAT,
+                                       [batch, height, width, in_channels])
+
+    # Weight stays NCHW [K, C, kH, kW]
+    W_shape = [out_channels, in_channels, kernel_h, kernel_w]
+    W_data = np.random.randn(*W_shape).astype(np.float32)
+    W = helper.make_tensor('W', TensorProto.FLOAT, W_shape,
+                           W_data.flatten().tolist())
+
+    # Output in NHWC order
+    out_h = (height + 2 * pad_h - kernel_h) // stride_h + 1
+    out_w = (width + 2 * pad_w - kernel_w) // stride_w + 1
+    Y = helper.make_tensor_value_info('Y', TensorProto.FLOAT,
+                                       [batch, out_h, out_w, out_channels])
+
+    # Conv node with channels_last attribute
+    conv_node = helper.make_node(
+        'Conv',
+        inputs=['X', 'W'],
+        outputs=['Y'],
+        kernel_shape=[kernel_h, kernel_w],
+        pads=[pad_h, pad_w, pad_h, pad_w],
+        strides=[stride_h, stride_w],
+    )
+    # Add channels_last=1 attribute (used by ORT's NhwcTransformer)
+    conv_node.attribute.append(
+        helper.make_attribute('channels_last', 1))
+
+    # Graph
+    graph = helper.make_graph(
+        [conv_node],
+        'conv_nhwc_test',
+        [X],
+        [Y],
+        [W],
+    )
+
+    # Model
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid('', 13)])
+    model.ir_version = 8
+
+    # Note: onnx.checker may warn about the non-standard channels_last
+    # attribute, but the model is still valid for our EP.
+    try:
+        onnx.checker.check_model(model)
+    except onnx.checker.ValidationError:
+        pass  # channels_last is a custom attribute
+    onnx.save(model, output_file)
+    print(f"Saved NHWC model to {output_file}")
+    print(f"  Input shape (NHWC): [{batch}, {height}, {width}, {in_channels}]")
+    print(f"  Weight shape (NCHW): {W_shape}")
+    print(f"  Output shape (NHWC): [{batch}, {out_h}, {out_w}, {out_channels}]")
+
+    # Save weights for reference comparison
+    np.save(output_file.replace('.onnx', '_weights.npy'), W_data)
+
+    return model, W_data
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
@@ -208,4 +291,20 @@ if __name__ == "__main__":
         stride_h=args.stride,
         stride_w=args.stride,
         output_file=args.output.replace('.onnx', '_bias.onnx')
+    )
+
+    # Also generate the NHWC conv model
+    create_conv_nhwc_model(
+        batch=args.batch,
+        in_channels=args.in_channels,
+        out_channels=args.out_channels,
+        height=args.height,
+        width=args.width,
+        kernel_h=args.kernel,
+        kernel_w=args.kernel,
+        pad_h=args.pad,
+        pad_w=args.pad,
+        stride_h=args.stride,
+        stride_w=args.stride,
+        output_file=args.output.replace('.onnx', '_nhwc.onnx')
     )
