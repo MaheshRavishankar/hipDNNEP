@@ -21,7 +21,6 @@
 #define CONV_BIAS_TEST_MODEL_PATH "./conv_test_bias.onnx"
 #endif
 
-
 class HipDNNConvTest : public ::testing::Test {
  protected:
   void SetUp() override {
