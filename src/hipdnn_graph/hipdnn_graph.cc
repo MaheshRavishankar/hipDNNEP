@@ -480,6 +480,16 @@ static std::optional<hipdnn_frontend::PointwiseMode> GetPointwiseMode(
   return std::nullopt;
 }
 
+// Map ONNX unary pointwise op name to hipDNN PointwiseMode.
+// Keep this list in sync with the unary pointwise dispatch in
+// src/core/ep.cc (IsSupportedOp).
+static std::optional<hipdnn_frontend::PointwiseMode> GetUnaryPointwiseMode(
+    const std::string& op_type) {
+  using hipdnn_frontend::PointwiseMode;
+  if (op_type == "Sigmoid") return PointwiseMode::SIGMOID_FWD;
+  return std::nullopt;
+}
+
 // Add a pointwise binary operation (Mul, Sub, Add, Div) to hipDNN graph
 // Takes two input tensor attributes, returns output tensor attribute
 Status AddPointwiseNode(
@@ -510,6 +520,42 @@ Status AddPointwiseNode(
   PointwiseAttributes pw;
   pw.set_mode(mode.value()).set_compute_data_type(compute_dtype.value());
   output_attr = graph.pointwise(a_attr, b_attr, pw);
+
+  return Status::Success();
+}
+
+// Add a unary pointwise operation (Sigmoid) to hipDNN graph
+// Takes one input tensor attribute, returns output tensor attribute
+static Status AddUnaryPointwiseNode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    TensorAttrPtr& output_attr) {
+  using namespace hipdnn_frontend::graph;
+
+  if (input_attrs.size() != 1) {
+    return Status::Failure("Unary pointwise op requires exactly 1 input tensor attribute");
+  }
+
+  std::string op_type = node.GetOperatorType();
+  auto mode = GetUnaryPointwiseMode(op_type);
+  if (!mode.has_value()) {
+    return Status::Failure("Unsupported unary pointwise op type: " + op_type);
+  }
+
+  const auto& x_attr = input_attrs[0];
+
+  // For unary ops, compute type is derived from the single input
+  auto x_dtype = x_attr->get_data_type();
+  bool is_float = (x_dtype == hipdnn_frontend::DataType::FLOAT ||
+                   x_dtype == hipdnn_frontend::DataType::HALF);
+  if (!is_float) {
+    return Status::Failure("Unsupported data type for unary pointwise compute");
+  }
+
+  PointwiseAttributes pw;
+  pw.set_mode(mode.value()).set_compute_data_type(hipdnn_frontend::DataType::FLOAT);
+  output_attr = graph.pointwise(x_attr, pw);
 
   return Status::Success();
 }
@@ -545,6 +591,14 @@ Status AddNode(
   if (GetPointwiseMode(op_type).has_value()) {
     TensorAttrPtr y_attr;
     auto status = AddPointwiseNode(graph, node, input_attrs, y_attr);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (GetUnaryPointwiseMode(op_type).has_value()) {
+    TensorAttrPtr y_attr;
+    auto status = AddUnaryPointwiseNode(graph, node, input_attrs, y_attr);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -835,6 +889,47 @@ bool IsFusilliCompatibleMLIROp(llvm::StringRef op_name) {
          op_name == "torch.aten.matmul" || op_name == "torch.aten.addmm";
 }
 
+// Map torch.aten unary op name to hipDNN PointwiseMode.
+static std::optional<hipdnn_frontend::PointwiseMode> GetUnaryPointwiseModeFromMLIR(
+    llvm::StringRef op_name) {
+  using hipdnn_frontend::PointwiseMode;
+  if (op_name == "torch.aten.sigmoid") return PointwiseMode::SIGMOID_FWD;
+  return std::nullopt;
+}
+
+// Add a unary pointwise operation from MLIR (e.g., torch.aten.sigmoid)
+static Status AddUnaryPointwiseNodeFromMLIR(
+    hipdnn_frontend::graph::Graph& graph,
+    mlir::Operation* op,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    TensorAttrPtr& output_attr) {
+  using namespace hipdnn_frontend::graph;
+
+  if (input_attrs.size() != 1) {
+    return Status::Failure("MLIR unary pointwise op requires exactly 1 input tensor attribute");
+  }
+
+  auto mode = GetUnaryPointwiseModeFromMLIR(op->getName().getStringRef());
+  if (!mode.has_value()) {
+    return Status::Failure("Unsupported MLIR unary pointwise op: " +
+                           op->getName().getStringRef().str());
+  }
+
+  const auto& x_attr = input_attrs[0];
+  auto x_dtype = x_attr->get_data_type();
+  bool is_float = (x_dtype == hipdnn_frontend::DataType::FLOAT ||
+                   x_dtype == hipdnn_frontend::DataType::HALF);
+  if (!is_float) {
+    return Status::Failure("Unsupported data type for unary pointwise compute");
+  }
+
+  PointwiseAttributes pw;
+  pw.set_mode(mode.value()).set_compute_data_type(hipdnn_frontend::DataType::FLOAT);
+  output_attr = graph.pointwise(x_attr, pw);
+
+  return Status::Success();
+}
+
 // Dispatch MLIR op to appropriate Add*Node function
 Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
                        mlir::Operation* op,
@@ -857,6 +952,14 @@ Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
     TensorAttrPtr y_attr;
     auto status = AddMatMulNodeFromMLIR(graph, op, input_attrs, y_attr,
                                         next_uid);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (GetUnaryPointwiseModeFromMLIR(op_name).has_value()) {
+    TensorAttrPtr y_attr;
+    auto status = AddUnaryPointwiseNodeFromMLIR(graph, op, input_attrs, y_attr);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();

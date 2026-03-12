@@ -258,6 +258,38 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
   }
 }
 
+// Check if a unary pointwise op (Sigmoid) is supported by this EP
+static bool IsSupportedUnaryPointwise(Ort::ConstNode node) {
+  try {
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    // Unary pointwise ops require exactly 1 input and 1 output
+    if (inputs.size() != 1 || outputs.size() != 1) {
+      return false;
+    }
+
+    // Check data types - input and output must share the same element type.
+    ONNXTensorElementDataType x_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
+
+    if (x_type != y_type) {
+      return false;
+    }
+
+    // Input must have a static shape
+    auto x_shape = GetTensorShape(inputs[0]);
+    if (!x_shape.has_value()) {
+      return false;  // Dynamic shapes not supported yet
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if a pointwise binary op (Mul, Sub, Add, Div) is supported by this EP
 static bool IsSupportedPointwise(Ort::ConstNode node) {
   try {
@@ -331,6 +363,12 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   if (op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
       op_type == "Div") {
     return IsSupportedPointwise(node);
+  }
+
+  // Unary pointwise ops.  Keep this list in sync with GetUnaryPointwiseMode()
+  // in src/hipdnn_graph/hipdnn_graph.cc.
+  if (op_type == "Sigmoid") {
+    return IsSupportedUnaryPointwise(node);
   }
 
   return false;
