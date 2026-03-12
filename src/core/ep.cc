@@ -9,6 +9,7 @@
 
 #include "hipdnn_ep/blas_graph/blas_graph.h"
 
+#include <algorithm>
 #include <hipdnn_backend.h>
 
 namespace hipdnn_ep {
@@ -286,8 +287,17 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
       return false;  // Dynamic shapes not supported yet
     }
 
-    // Shapes must match exactly (no broadcasting for now)
-    if (*a_shape != *b_shape) {
+    // Check shape compatibility.  We support:
+    //   - Exact shape match
+    //   - One or both inputs are scalar (rank 0, or every dim is 1)
+    // General broadcasting is not supported.
+    auto is_scalar = [](const std::vector<int64_t>& shape) {
+      return shape.empty() ||
+             std::all_of(shape.begin(), shape.end(),
+                         [](int64_t d) { return d == 1; });
+    };
+
+    if (*a_shape != *b_shape && !is_scalar(*a_shape) && !is_scalar(*b_shape)) {
       return false;
     }
 
