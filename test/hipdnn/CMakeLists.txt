@@ -6,16 +6,13 @@ target_sources(hipdnn_ep_tests PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/test_conv.cc
 )
 
-# Generate Conv test models (plain, with bias, and NHWC)
+# Generate Conv test models (plain and with bias)
 set(CONV_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/conv_test.onnx")
 set(CONV_BIAS_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/conv_test_bias.onnx")
-set(CONV_NHWC_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/conv_test_nhwc.onnx")
 add_custom_command(
   OUTPUT ${CONV_TEST_MODEL}
          ${CMAKE_CURRENT_BINARY_DIR}/conv_test_weights.npy
          ${CONV_BIAS_TEST_MODEL}
-         ${CONV_NHWC_TEST_MODEL}
-         ${CMAKE_CURRENT_BINARY_DIR}/conv_test_nhwc_weights.npy
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_conv_model.py
           --output ${CONV_TEST_MODEL}
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_conv_model.py
@@ -23,13 +20,12 @@ add_custom_command(
   VERBATIM
 )
 add_custom_target(generate_conv_test_model DEPENDS
-  ${CONV_TEST_MODEL} ${CONV_BIAS_TEST_MODEL} ${CONV_NHWC_TEST_MODEL})
+  ${CONV_TEST_MODEL} ${CONV_BIAS_TEST_MODEL})
 add_dependencies(hipdnn_ep_tests generate_conv_test_model)
 
 target_compile_definitions(hipdnn_ep_tests PRIVATE
   CONV_TEST_MODEL_PATH="${CONV_TEST_MODEL}"
   CONV_BIAS_TEST_MODEL_PATH="${CONV_BIAS_TEST_MODEL}"
-  CONV_NHWC_TEST_MODEL_PATH="${CONV_NHWC_TEST_MODEL}"
 )
 
 # hipDNN (Pointwise) test sources
