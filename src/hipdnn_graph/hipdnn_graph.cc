@@ -28,7 +28,8 @@ namespace {
 // Layout for 4D convolution tensors.
 // NCHW: row-major / channels-first (default)
 // NHWC: channels-last
-enum class ConvLayout { NCHW, NHWC };
+enum class ConvLayout { NCHW,
+                        NHWC };
 
 // Compute row-major strides from shape (NCHW / default layout).
 static std::vector<int64_t> ComputeStrides(const std::vector<int64_t>& shape) {
