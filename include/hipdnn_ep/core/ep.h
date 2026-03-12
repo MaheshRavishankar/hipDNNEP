@@ -27,10 +27,6 @@ class HipDNNEp : public OrtEp, public ApiPtrs {
     bool use_torch_mlir{false};
     bool dump_input_module{false};
     bool dump_lowered_module{false};
-    // TODO: Add prefer_nhwc option when the hipDNN/Fusilli backend supports
-    // NHWC convolutions.  The EP infrastructure (GetConvLayoutFromNode in
-    // hipdnn_graph.cc) is ready to detect NHWC from the ORT node's domain
-    // and attributes.
   };
 
   HipDNNEp(HipDNNEpFactory& factory, const Config& config, const OrtLogger& logger);
