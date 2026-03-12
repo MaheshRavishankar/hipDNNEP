@@ -1201,8 +1201,7 @@ Status HipDNNGraphImpl::Build(
         return Status::Failure("Unsupported data type for output: " + name);
       }
 
-      output_attrs[i]->set_uid(next_uid_++).set_name(name).set_data_type(
-          dtype.value());
+      output_attrs[i]->set_uid(next_uid_++).set_name(name).set_data_type(dtype.value());
 
       // If the per-op node builder already set dim/stride (e.g. AddConvNode
       // for NHWC), keep them.  Otherwise read shape from the ORT graph and
