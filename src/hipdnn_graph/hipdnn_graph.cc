@@ -926,7 +926,6 @@ bool IsFusilliCompatibleMLIROp(llvm::StringRef op_name) {
          op_name == "torch.aten.matmul" || op_name == "torch.aten.addmm";
 }
 
-// Dispatch MLIR op to appropriate Add*Node function
 // Dispatch MLIR op to appropriate Add*Node function.
 // Also returns the layout used by the node via out_layout.
 Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
