@@ -1014,7 +1014,6 @@ static Status AddUnaryPointwiseNodeFromMLIR(
   return Status::Success();
 }
 
-// Dispatch MLIR op to appropriate Add*Node function
 // Dispatch MLIR op to appropriate Add*Node function.
 // Also returns the layout used by the node via out_layout.
 Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
