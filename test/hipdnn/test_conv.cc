@@ -21,6 +21,10 @@
 #define CONV_BIAS_TEST_MODEL_PATH "./conv_test_bias.onnx"
 #endif
 
+#ifndef CONV_NHWC_TEST_MODEL_PATH
+#define CONV_NHWC_TEST_MODEL_PATH "./conv_test_nhwc.onnx"
+#endif
+
 class HipDNNConvTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -328,6 +332,128 @@ TEST_F(HipDNNConvTest, ConvWithBias) {
   }
 
   std::cout << "Max difference between CPU and GPU (conv+bias): " << max_diff
+            << std::endl;
+}
+
+TEST_F(HipDNNConvTest, NhwcConv2D) {
+  ASSERT_TRUE(ep_available_) << "HipDNN EP not available";
+
+  // Check if NHWC model file exists
+  std::ifstream nhwc_model_file(CONV_NHWC_TEST_MODEL_PATH);
+  ASSERT_TRUE(nhwc_model_file.good())
+      << "Conv NHWC test model not available at: " << CONV_NHWC_TEST_MODEL_PATH;
+
+  // Model parameters (must match gen_conv_model.py defaults)
+  // NHWC input shape: [N, H, W, C]
+  const int64_t N = 1, H = 8, W = 8, C = 1;
+  const std::vector<int64_t> input_shape = {N, H, W, C};
+  const size_t input_size = N * H * W * C;
+
+  // Create input data
+  std::vector<float> input_data(input_size);
+  for (size_t i = 0; i < input_size; ++i) {
+    input_data[i] = static_cast<float>(i % 10) / 10.0f;
+  }
+
+  // Run with CPU EP first to get reference output
+  std::vector<float> cpu_output;
+  {
+    Ort::SessionOptions session_options;
+    Ort::Session session(*env_, CONV_NHWC_TEST_MODEL_PATH, session_options);
+
+    auto memory_info =
+        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, input_data.data(), input_size, input_shape.data(),
+        input_shape.size());
+
+    const char* input_names[] = {"X"};
+    const char* output_names[] = {"Y"};
+
+    auto output_tensors = session.Run(Ort::RunOptions{}, input_names,
+                                      &input_tensor, 1, output_names, 1);
+
+    ASSERT_EQ(output_tensors.size(), 1);
+    auto& output_tensor = output_tensors[0];
+    auto output_info = output_tensor.GetTensorTypeAndShapeInfo();
+    size_t output_size = output_info.GetElementCount();
+
+    const float* output_data = output_tensor.GetTensorData<float>();
+    cpu_output.assign(output_data, output_data + output_size);
+
+    std::cout << "CPU output size (NHWC conv): " << output_size << std::endl;
+  }
+
+  // Run with HipDNN EP
+  std::vector<float> gpu_output;
+  {
+    std::vector<Ort::ConstEpDevice> devices = env_->GetEpDevices();
+    ASSERT_FALSE(devices.empty()) << "No EP devices found";
+
+    const OrtEpDevice* hipdnn_device = nullptr;
+    for (const auto& device : devices) {
+      std::string ep_name = device.EpName();
+      if (ep_name == "HipDNN") {
+        hipdnn_device = static_cast<const OrtEpDevice*>(device);
+        break;
+      }
+    }
+
+    ASSERT_NE(hipdnn_device, nullptr) << "No HipDNN device found";
+
+    Ort::SessionOptions session_options;
+
+    OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+        session_options, *env_, &hipdnn_device, 1, nullptr, nullptr, 0);
+
+    if (status != nullptr) {
+      std::string error_msg = Ort::GetApi().GetErrorMessage(status);
+      Ort::GetApi().ReleaseStatus(status);
+      FAIL() << "Failed to add HipDNN EP: " << error_msg;
+    }
+
+    std::cout << "Creating session with HipDNN EP (NHWC conv)..." << std::endl;
+    Ort::Session session(*env_, CONV_NHWC_TEST_MODEL_PATH, session_options);
+    std::cout << "Session created successfully" << std::endl;
+
+    auto memory_info =
+        Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
+        memory_info, input_data.data(), input_size, input_shape.data(),
+        input_shape.size());
+
+    const char* input_names[] = {"X"};
+    const char* output_names[] = {"Y"};
+
+    std::cout << "Running inference (NHWC conv)..." << std::endl;
+    auto output_tensors = session.Run(Ort::RunOptions{}, input_names,
+                                      &input_tensor, 1, output_names, 1);
+    std::cout << "Inference completed" << std::endl;
+
+    ASSERT_EQ(output_tensors.size(), 1);
+    auto& output_tensor = output_tensors[0];
+    auto output_info = output_tensor.GetTensorTypeAndShapeInfo();
+    size_t output_size = output_info.GetElementCount();
+
+    const float* output_data = output_tensor.GetTensorData<float>();
+    gpu_output.assign(output_data, output_data + output_size);
+
+    std::cout << "GPU output size (NHWC conv): " << output_size << std::endl;
+  }
+
+  // Compare outputs
+  ASSERT_EQ(cpu_output.size(), gpu_output.size()) << "Output size mismatch";
+
+  float max_diff = 0.0f;
+  for (size_t i = 0; i < cpu_output.size(); ++i) {
+    float diff = std::abs(cpu_output[i] - gpu_output[i]);
+    max_diff = std::max(max_diff, diff);
+    EXPECT_NEAR(cpu_output[i], gpu_output[i], 1e-4f)
+        << "Mismatch at index " << i << ": CPU=" << cpu_output[i]
+        << ", GPU=" << gpu_output[i];
+  }
+
+  std::cout << "Max difference between CPU and GPU (NHWC conv): " << max_diff
             << std::endl;
 }
 
