@@ -226,16 +226,40 @@ Status CreateTensorAttr(
 }
 
 // Reshape a 1D bias [C] to NCHW-broadcast shape [1, C, 1, 1] so that hipDNN
-// pointwise ADD can broadcast it over the 4D conv output.  If the bias is
-// already 4D or scalar (dim={1}), it is left unchanged.
-static void ReshapeBiasForConv(const TensorAttrPtr& bias) {
+// pointwise ADD can broadcast it over the 4D conv output.
+//
+// Accepted inputs:
+//   - pass-by-value scalar   -> left unchanged (broadcasts naturally)
+//   - 1D [C]                 -> reshaped to [1, C, 1, 1]
+//   - 4D (already broadcast) -> left unchanged
+//
+// This function assumes NCHW layout.  The EP currently only supports NCHW
+// convolutions (strides are computed via ComputeStrides which produces
+// row-major / NCHW order).  NHWC would require [1, 1, 1, C] instead.
+// TODO: Support NHWC layout when the EP adds channel-last convolutions.
+static Status ReshapeBiasForConv(const TensorAttrPtr& bias) {
+  // Pass-by-value scalars have dim={1} set by set_value(); leave them alone.
+  if (bias->get_pass_by_value()) {
+    return Status::Success();
+  }
+
   auto bias_dim = bias->get_dim();
 
-  // 1D bias [C] -> [1, C, 1, 1]
-  if (bias_dim.size() == 1 && bias_dim[0] != 1) {
+  if (bias_dim.size() == 4) {
+    // Already 4D — assume the caller shaped it correctly.
+    return Status::Success();
+  }
+
+  if (bias_dim.size() == 1) {
+    // 1D bias [C] -> NCHW broadcast shape [1, C, 1, 1].
     bias->set_dim({1, bias_dim[0], 1, 1});
     bias->set_stride({bias_dim[0], 1, 1, 1});
+    return Status::Success();
   }
+
+  return Status::Failure(
+      "Conv bias has unsupported rank " + std::to_string(bias_dim.size()) +
+      "; expected 1D [C] or 4D [1,C,1,1]");
 }
 
 // Add Conv operation to hipDNN graph
@@ -304,7 +328,8 @@ Status AddConvNode(
     auto dtype = compute_dtype.value();
     output_attr->set_data_type(dtype);
     auto bias = input_attrs[2];
-    ReshapeBiasForConv(bias);
+    auto reshape_status = ReshapeBiasForConv(bias);
+    if (reshape_status.failed()) return reshape_status;
 
     PointwiseAttributes add;
     add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
@@ -605,7 +630,8 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
     auto dtype = compute_dtype.value();
     output_attr->set_data_type(dtype);
     auto bias = input_attrs[2];
-    ReshapeBiasForConv(bias);
+    auto reshape_status = ReshapeBiasForConv(bias);
+    if (reshape_status.failed()) return reshape_status;
 
     PointwiseAttributes add;
     add.set_mode(PointwiseMode::ADD).set_compute_data_type(dtype);
