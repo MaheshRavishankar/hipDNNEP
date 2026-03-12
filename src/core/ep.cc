@@ -268,17 +268,13 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
       return false;
     }
 
-    // Check data types - we support float and float16
+    // Check data types - all inputs and output must share the same element type.
+    // The hipDNN backend handles type compatibility, so we accept any ONNX type.
     ONNXTensorElementDataType a_type = GetTensorElementType(inputs[0]);
     ONNXTensorElementDataType b_type = GetTensorElementType(inputs[1]);
     ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
 
-    bool supported_type =
-        (a_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-         a_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) &&
-        a_type == b_type && a_type == y_type;
-
-    if (!supported_type) {
+    if (a_type != b_type || a_type != y_type) {
       return false;
     }
 
