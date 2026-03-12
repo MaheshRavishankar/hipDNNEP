@@ -292,19 +292,3 @@ if __name__ == "__main__":
         stride_w=args.stride,
         output_file=args.output.replace('.onnx', '_bias.onnx')
     )
-
-    # Also generate the NHWC conv model
-    create_conv_nhwc_model(
-        batch=args.batch,
-        in_channels=args.in_channels,
-        out_channels=args.out_channels,
-        height=args.height,
-        width=args.width,
-        kernel_h=args.kernel,
-        kernel_w=args.kernel,
-        pad_h=args.pad,
-        pad_w=args.pad,
-        stride_h=args.stride,
-        stride_w=args.stride,
-        output_file=args.output.replace('.onnx', '_nhwc.onnx')
-    )
