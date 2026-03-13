@@ -67,15 +67,6 @@ std::optional<hipdnn_frontend::DataType> GetComputeDataType(
   return std::nullopt;
 }
 
-// Determine compute data type for unary operations.
-static std::optional<hipdnn_frontend::DataType> GetUnaryComputeDataType(
-    hipdnn_frontend::DataType x_dtype) {
-  if (IsFloatDataType(x_dtype)) {
-    return hipdnn_frontend::DataType::FLOAT;
-  }
-  return std::nullopt;
-}
-
 using TensorAttrPtr = std::shared_ptr<hipdnn_frontend::graph::TensorAttributes>;
 
 // Return true if the tensor has exactly one element (scalar).
@@ -522,13 +513,10 @@ Status AddPointwiseNode(
   const auto& a_attr = input_attrs[0];
   const auto& b_attr = input_attrs[1];
 
-  auto compute_dtype = GetComputeDataType(a_attr->get_data_type(), b_attr->get_data_type());
-  if (!compute_dtype.has_value()) {
-    return Status::Failure("Unsupported data type combination for pointwise compute");
-  }
-
+  // Pointwise ops have no reduction, so compute_data_type just needs to
+  // match the input precision.  Use the first operand's type.
   PointwiseAttributes pw;
-  pw.set_mode(mode.value()).set_compute_data_type(compute_dtype.value());
+  pw.set_mode(mode.value()).set_compute_data_type(a_attr->get_data_type());
   output_attr = graph.pointwise(a_attr, b_attr, pw);
 
   return Status::Success();
@@ -555,13 +543,10 @@ static Status AddUnaryPointwiseNode(
 
   const auto& x_attr = input_attrs[0];
 
-  auto compute_dtype = GetUnaryComputeDataType(x_attr->get_data_type());
-  if (!compute_dtype.has_value()) {
-    return Status::Failure("Unsupported data type for unary pointwise compute");
-  }
-
+  // Pointwise ops have no reduction, so compute_data_type just needs to
+  // match the input precision.
   PointwiseAttributes pw;
-  pw.set_mode(mode.value()).set_compute_data_type(compute_dtype.value());
+  pw.set_mode(mode.value()).set_compute_data_type(x_attr->get_data_type());
   output_attr = graph.pointwise(x_attr, pw);
 
   return Status::Success();
@@ -929,13 +914,10 @@ static Status AddUnaryPointwiseNodeFromMLIR(
 
   const auto& x_attr = input_attrs[0];
 
-  auto compute_dtype = GetUnaryComputeDataType(x_attr->get_data_type());
-  if (!compute_dtype.has_value()) {
-    return Status::Failure("Unsupported data type for unary pointwise compute");
-  }
-
+  // Pointwise ops have no reduction, so compute_data_type just needs to
+  // match the input precision.
   PointwiseAttributes pw;
-  pw.set_mode(mode.value()).set_compute_data_type(compute_dtype.value());
+  pw.set_mode(mode.value()).set_compute_data_type(x_attr->get_data_type());
   output_attr = graph.pointwise(x_attr, pw);
 
   return Status::Success();
