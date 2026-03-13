@@ -96,7 +96,8 @@ void HipDNNOffloadPass::runOnOperation() {
                   mlir::torch::Torch::AtenMatmulOp,
                   mlir::torch::Torch::AtenAddmmOp,
                   mlir::torch::Torch::AtenConvolutionOp,
-                  mlir::torch::Torch::AtenConv2dOp>(op)) {
+                  mlir::torch::Torch::AtenConv2dOp,
+                  mlir::torch::Torch::AtenSigmoidOp>(op)) {
       opsToOutline.push_back(op);
     }
   });
