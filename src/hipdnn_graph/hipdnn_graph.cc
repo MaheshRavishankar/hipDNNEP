@@ -455,6 +455,18 @@ Status AddMatMulNode(
   return Status::Success();
 }
 
+// Returns true if the ONNX op type is handled by the Fusilli engine.
+// When all ops in a graph are Fusilli-compatible we request that engine;
+// otherwise we let hipDNN pick the best available engine per-op.
+// Keep in sync with IsFusilliCompatibleMLIROp below.
+// MatMul/Gemm are included because hipBLAS-LT is currently disabled;
+// revisit when re-enabled.
+bool IsFusilliCompatibleOp(const std::string& op_type) {
+  return op_type == "Conv" || op_type == "MatMul" || op_type == "Gemm" ||
+         op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
+         op_type == "Div";
+}
+
 // Map ONNX pointwise op name to hipDNN PointwiseMode.
 // Keep this list in sync with the pointwise dispatch in
 // src/core/ep.cc (IsSupportedOp).
@@ -813,6 +825,16 @@ Status AddMatMulNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
   return Status::Success();
 }
 
+// Returns true if the MLIR op is handled by the Fusilli engine.
+// Keep in sync with IsFusilliCompatibleOp above.
+// Pointwise MLIR ops are not yet handled by AddNodeFromMLIR; extend
+// here when added.
+bool IsFusilliCompatibleMLIROp(llvm::StringRef op_name) {
+  return op_name == "torch.aten.convolution" ||
+         op_name == "torch.aten.conv2d" || op_name == "torch.aten.mm" ||
+         op_name == "torch.aten.matmul" || op_name == "torch.aten.addmm";
+}
+
 // Dispatch MLIR op to appropriate Add*Node function
 Status AddNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
                        mlir::Operation* op,
@@ -888,6 +910,11 @@ struct HipDNNGraphImpl {
 
   // UID counter for tensor attributes
   int64_t next_uid_{1};
+
+  // True when every op in the graph is handled by the Fusilli engine.
+  // Set during Build(); Compile() uses it to decide whether to request
+  // the FUSILLI_ENGINE or let hipDNN choose per-op.
+  bool all_fusilli_compatible_{true};
 };
 
 Status HipDNNGraphImpl::Build(
@@ -933,6 +960,11 @@ Status HipDNNGraphImpl::Build(
 
   // Process each node in the graph
   for (const auto& node : nodes) {
+    // Track whether all ops are Fusilli-compatible.
+    if (!IsFusilliCompatibleOp(node.GetOperatorType())) {
+      all_fusilli_compatible_ = false;
+    }
+
     // Look up input TensorAttributes from symbol table
     std::vector<Ort::ConstValueInfo> node_inputs = node.GetInputs();
     std::vector<TensorAttrPtr> input_attrs;
@@ -1065,6 +1097,11 @@ Status HipDNNGraphImpl::Build(mlir::Region& region) {
       }
     }
 
+    // Track whether all ops are Fusilli-compatible.
+    if (!IsFusilliCompatibleMLIROp(op.getName().getStringRef())) {
+      all_fusilli_compatible_ = false;
+    }
+
     std::vector<TensorAttrPtr> output_attrs;
     auto status = AddNodeFromMLIR(*graph_, &op, input_attrs, output_attrs,
                                   next_uid_);
@@ -1120,7 +1157,9 @@ Status HipDNNGraphImpl::Compile() {
     return Status::Failure("hipDNN build_operation_graph failed: " + error.get_message());
   }
 
-  graph_->set_preferred_engine_id_ext("FUSILLI_ENGINE");
+  if (all_fusilli_compatible_) {
+    graph_->set_preferred_engine_id_ext("FUSILLI_ENGINE");
+  }
   error = graph_->create_execution_plans({HeuristicMode::FALLBACK});
   if (error.is_bad()) {
     return Status::Failure("hipDNN create_execution_plans failed: " + error.get_message());
