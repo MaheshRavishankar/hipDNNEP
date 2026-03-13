@@ -418,19 +418,25 @@ Status AddConvNode(
     output_attr = graph.pointwise(output_attr, bias, add);
   }
 
-  // For NHWC, set the output dim and stride so callers don't need to know
-  // the layout.  Read the output shape from the ORT node, relabel from
-  // [N,H,W,C] to [N,C,H,W], and apply NHWC strides.
-  if (layout == ConvLayout::NHWC) {
+  // Set output dim and stride so that callers (Build()) do not need to know
+  // the convolution layout.  For NHWC, relabel ORT's [N,H,W,C] to hipDNN's
+  // [N,C,H,W] and apply NHWC strides; for NCHW, read the shape as-is and
+  // apply row-major strides.
+  {
     std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
     if (!outputs.empty()) {
       auto shape = GetTensorShape(outputs[0]);
       if (shape.has_value() && shape->size() == 4) {
-        // ORT shape [N, H, W, C] -> hipDNN dim [N, C, H, W]
-        std::vector<int64_t> out_dim = {
-            (*shape)[0], (*shape)[3], (*shape)[1], (*shape)[2]};
-        output_attr->set_dim(out_dim);
-        output_attr->set_stride(ComputeNHWCStrides(out_dim));
+        if (layout == ConvLayout::NHWC) {
+          // ORT shape [N, H, W, C] -> hipDNN dim [N, C, H, W]
+          std::vector<int64_t> out_dim = {
+              (*shape)[0], (*shape)[3], (*shape)[1], (*shape)[2]};
+          output_attr->set_dim(out_dim);
+          output_attr->set_stride(ComputeNHWCStrides(out_dim));
+        } else {
+          output_attr->set_dim(shape.value());
+          output_attr->set_stride(ComputeStrides(shape.value()));
+        }
       }
     }
   }
@@ -747,8 +753,8 @@ Status AddConvNodeFromMLIR(hipdnn_frontend::graph::Graph& graph,
     return Status::Failure("Conv filter W must be a tensor, not a scalar");
   }
 
-  // The MLIR path currently only supports NCHW convolutions.
-  // TODO: Support NHWC in the MLIR path when Torch-MLIR exposes layout info.
+  // The MLIR path only supports NCHW convolutions.  NHWC is rejected at
+  // module build time (IRBuilderImpl::BuildModule) so it cannot reach here.
   ConvLayout layout = ConvLayout::NCHW;
 
   std::vector<int64_t> pads = {0, 0, 0, 0};
