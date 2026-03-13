@@ -250,6 +250,19 @@ bool IRBuilderImpl::BuildModule(
 
   // Process nodes in topological order
   for (const auto& node : nodes) {
+    // The MLIR path does not support NHWC convolutions.  Reject early so
+    // that AddConvNodeFromMLIR never silently defaults to NCHW.
+    std::string op_type = node.GetOperatorType();
+    if (op_type == "Conv") {
+      int64_t channels_last = GetIntAttrOrDefault(node, "channels_last", 0);
+      std::string domain = node.GetDomain();
+      if (channels_last == 1 || domain == "com.ms.internal.nhwc") {
+        mlir::emitError(mlir::UnknownLoc::get(&ctx))
+            << "NHWC convolution is not supported in the Torch-MLIR path";
+        return false;
+      }
+    }
+
     // Gather input values
     auto input_names = GetNodeInputNames(node);
     llvm::SmallVector<mlir::Value> input_values;

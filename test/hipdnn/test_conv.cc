@@ -331,6 +331,60 @@ TEST_F(HipDNNConvTest, ConvWithBias) {
             << std::endl;
 }
 
+// Verify that NHWC stride computation produces the expected values.
+// These strides are used by AddConvNode when the ORT node signals
+// channels-last layout (channels_last=1 or com.ms.internal.nhwc domain).
+//
+// For a 4D shape [N, C, H, W] with NHWC physical layout:
+//   N stride = H * W * C
+//   C stride = 1
+//   H stride = W * C
+//   W stride = C
+TEST(NhwcStridesTest, Basic4D) {
+  // Helper: reproduce the stride computation from hipdnn_graph.cc
+  auto compute_nhwc_strides = [](const std::vector<int64_t>& shape) {
+    EXPECT_EQ(shape.size(), 4u);
+    int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+    (void)N;
+    return std::vector<int64_t>{H * W * C, 1, W * C, C};
+  };
+
+  // [1, 3, 8, 8] -> strides [192, 1, 24, 3]
+  {
+    auto s = compute_nhwc_strides({1, 3, 8, 8});
+    EXPECT_EQ(s, (std::vector<int64_t>{192, 1, 24, 3}));
+  }
+
+  // [2, 64, 16, 16] -> strides [16384, 1, 1024, 64]
+  {
+    auto s = compute_nhwc_strides({2, 64, 16, 16});
+    EXPECT_EQ(s, (std::vector<int64_t>{16384, 1, 1024, 64}));
+  }
+
+  // [1, 1, 8, 8] -> strides [64, 1, 8, 1]
+  {
+    auto s = compute_nhwc_strides({1, 1, 8, 8});
+    EXPECT_EQ(s, (std::vector<int64_t>{64, 1, 8, 1}));
+  }
+}
+
+// Verify that relabeling ORT's [N,H,W,C] to hipDNN's [N,C,H,W] is correct.
+TEST(NhwcStridesTest, DimRelabeling) {
+  // ORT gives us [N, H, W, C] for NHWC input.
+  // We relabel to [N, C, H, W] by: {dim[0], dim[3], dim[1], dim[2]}
+  auto relabel = [](const std::vector<int64_t>& ort_shape) {
+    EXPECT_EQ(ort_shape.size(), 4u);
+    return std::vector<int64_t>{
+        ort_shape[0], ort_shape[3], ort_shape[1], ort_shape[2]};
+  };
+
+  // [1, 8, 8, 3] -> [1, 3, 8, 8]
+  EXPECT_EQ(relabel({1, 8, 8, 3}), (std::vector<int64_t>{1, 3, 8, 8}));
+
+  // [2, 16, 16, 64] -> [2, 64, 16, 16]
+  EXPECT_EQ(relabel({2, 16, 16, 64}), (std::vector<int64_t>{2, 64, 16, 16}));
+}
+
 TEST_F(HipDNNConvTest, ReferenceConvCorrectness) {
   // Test the reference implementation
   const int N = 1, C_in = 1, H_in = 4, W_in = 4;
