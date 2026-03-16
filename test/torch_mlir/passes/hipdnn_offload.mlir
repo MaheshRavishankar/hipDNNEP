@@ -65,6 +65,19 @@ func.func @conv2d(%arg0: !torch.vtensor<[1,3,32,32],f32>, %arg1: !torch.vtensor<
 
 // -----
 
+// CHECK-LABEL: func.func @sigmoid
+//       CHECK:   %[[RESULT:.*]] = torch.operator "hipdnn.graph"(%arg0)
+//       CHECK:   ^bb0(%[[X:.*]]: !torch.vtensor<[1,4,8,8],f32>):
+//       CHECK:     %[[SIG:.*]] = torch.aten.sigmoid %[[X]]
+//       CHECK:     torch.operator_terminator %[[SIG]]
+//       CHECK:   return %[[RESULT]]
+func.func @sigmoid(%arg0: !torch.vtensor<[1,4,8,8],f32>) -> !torch.vtensor<[1,4,8,8],f32> {
+  %0 = torch.aten.sigmoid %arg0 : !torch.vtensor<[1,4,8,8],f32> -> !torch.vtensor<[1,4,8,8],f32>
+  return %0 : !torch.vtensor<[1,4,8,8],f32>
+}
+
+// -----
+
 // Verify that non-supported ops are not outlined
 // CHECK-LABEL: func.func @relu_not_outlined
 //       CHECK:   torch.aten.relu

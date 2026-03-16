@@ -75,3 +75,32 @@ endforeach()
 
 add_custom_target(generate_pointwise_test_models DEPENDS ${_pw_models})
 add_dependencies(hipdnn_ep_tests generate_pointwise_test_models)
+
+# hipDNN (Unary Pointwise / Sigmoid) test sources
+target_sources(hipdnn_ep_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_sigmoid.cc
+)
+
+# Generate Sigmoid test model
+set(_unary_pw_ops Sigmoid)
+set(_unary_pw_models "")
+foreach(_op IN LISTS _unary_pw_ops)
+  string(TOLOWER "${_op}" _op_lower)
+  set(_model "${CMAKE_CURRENT_BINARY_DIR}/${_op_lower}_test.onnx")
+  add_custom_command(
+    OUTPUT ${_model}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_unary_pointwise_model.py
+            --op ${_op} --output ${_model}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_unary_pointwise_model.py
+    COMMENT "Generating ${_op} test model"
+    VERBATIM
+  )
+  list(APPEND _unary_pw_models ${_model})
+  string(TOUPPER "${_op}" _op_upper)
+  target_compile_definitions(hipdnn_ep_tests PRIVATE
+    ${_op_upper}_TEST_MODEL_PATH="${_model}"
+  )
+endforeach()
+
+add_custom_target(generate_unary_pointwise_test_models DEPENDS ${_unary_pw_models})
+add_dependencies(hipdnn_ep_tests generate_unary_pointwise_test_models)
