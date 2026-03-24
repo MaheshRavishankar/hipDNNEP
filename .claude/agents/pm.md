@@ -126,15 +126,25 @@ Phase 6 cleanup.
 
 ### Step 3: Execute Actions
 
-Launch implementer agents for all identified actions. Use the Agent tool
-with `resume` if there's a prior agent ID for that bead's implementer.
+Launch implementer agents **inside a bwrap sandbox** using the
+`hipdnn-sandbox.sh` script. Each implementer runs as a separate Claude
+process with `--dangerously-skip-permissions`, sandboxed to the bead's
+worktree. Use the Bash tool to launch them:
 
-For new implementations (action D), use a fresh agent. For feedback and
-cleanup (actions A, B, C, G), resume the existing implementer agent if
-an agent ID is known.
+```bash
+# Launch a sandboxed implementer for a bead
+/home/mahesh/onnxruntime/hipDNNEP/scripts/hipdnn-sandbox.sh <bead-id> -- \
+  -p "You are an implementer agent for hipDNNEP. Read .claude/agents/implementer.md for your full instructions. <task description for this bead>"
+```
+
+For new implementations (action D), always launch a fresh sandboxed agent.
+For feedback and cleanup (actions A, B, C, G), launch a fresh sandboxed
+agent with a prompt that specifies the relevant phase (e.g., Phase 5b for
+PR feedback, Phase 6 for cleanup).
 
 **Launch independent actions in parallel** — e.g., addressing feedback on
-one PR while implementing a different bead.
+one PR while implementing a different bead. Use `run_in_background` on the
+Bash calls so multiple sandboxed agents run concurrently.
 
 ### Step 4: Report
 
@@ -159,13 +169,12 @@ After all agents complete, output a summary:
 
 ## Important Rules
 
-- **Never implement code yourself.** Always delegate to implementer agents.
+- **Never implement code yourself.** Always delegate to sandboxed
+  implementer agents via `hipdnn-sandbox.sh`.
 - **Never merge PRs.** Only the user can approve landing (Phase 6).
 - **Never modify the main checkout.** Only run read-only commands
   (`br`, `gh`, `git worktree list`, `git log`) in the main checkout.
 - **Distinguish infrastructure failures from code failures** in CI. Don't
   launch agents to fix GitHub Actions outages.
-- **Include agent IDs** in your report so the user can resume agents
-  for follow-up work.
 - **Be concise.** The user wants a status update and actions taken, not
   a wall of text.
