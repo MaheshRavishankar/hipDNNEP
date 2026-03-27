@@ -146,7 +146,7 @@ add_custom_command(
 add_custom_command(
   OUTPUT ${MHA_CROSS_TEST_MODEL}
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
-          --seq-len-kv 8 --output ${MHA_CROSS_TEST_MODEL}
+          --seq-len-kv 32 --output ${MHA_CROSS_TEST_MODEL}
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
   COMMENT "Generating MHA cross-attention test model"
   VERBATIM

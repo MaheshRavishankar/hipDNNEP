@@ -688,12 +688,15 @@ static Status AddSdpaNode(
     return Status::Failure("MultiHeadAttention requires at least 3 inputs (Q, K, V)");
   }
 
-  // The input attrs are shared pointers stored in the symbol table, so we
-  // must not mutate them in place — other downstream nodes may reference
-  // the same objects.  Copy before reshaping.
-  auto q_attr = std::make_shared<hipdnn_frontend::graph::TensorAttributes>(*input_attrs[0]);
-  auto k_attr = std::make_shared<hipdnn_frontend::graph::TensorAttributes>(*input_attrs[1]);
-  auto v_attr = std::make_shared<hipdnn_frontend::graph::TensorAttributes>(*input_attrs[2]);
+  // Reshape the input tensor attrs in place.  This is safe because the EP
+  // currently claims nodes individually (no fusion), so each tensor attr is
+  // consumed by exactly one node.  The attrs must be the same shared_ptr
+  // objects that Build() marked as is_virtual(false); passing copies would
+  // disconnect them from the graph's input tracking and hipDNN would treat
+  // them as virtual (internal) tensors with no data pointers.
+  auto q_attr = input_attrs[0];
+  auto k_attr = input_attrs[1];
+  auto v_attr = input_attrs[2];
 
   // Q, K, V must be 3D tensors.
   if (q_attr->get_dim().size() != 3 || k_attr->get_dim().size() != 3 ||
@@ -728,8 +731,16 @@ static Status AddSdpaNode(
   v_attr->set_dim({batch_size, num_heads, seq_len_kv, head_size});
   v_attr->set_stride({seq_len_kv * hidden_size, head_size, hidden_size, 1});
 
+  // Determine compute data type.
+  auto compute_dtype =
+      GetComputeDataType(q_attr->get_data_type(), k_attr->get_data_type());
+  if (!compute_dtype.has_value()) {
+    return Status::Failure("Unsupported data type combination for SDPA compute");
+  }
+
   // Build SdpaAttributes.
   SdpaAttributes sdpa_attrs;
+  sdpa_attrs.set_compute_data_type(compute_dtype.value());
 
   // Scale: default is 1/sqrt(head_size), can be overridden by attribute.
   float scale = GetFloatAttrOrDefault(node, "scale", 0.0f);
@@ -1255,6 +1266,19 @@ Status HipDNNGraphImpl::Build(
 
   graph_ = std::make_unique<Graph>();
 
+  // Set graph-level data types from the first graph input.  These are needed
+  // by ops like SDPA whose engine lookup depends on graph-level types.
+  // For ops that set their own compute_data_type (Conv, pointwise, etc.)
+  // the per-op type takes precedence.
+  if (!graph_inputs.empty()) {
+    auto first_dtype = ToHipDNNDataType(GetTensorElementType(graph_inputs[0]));
+    if (first_dtype.has_value()) {
+      graph_->set_io_data_type(first_dtype.value())
+          .set_intermediate_data_type(hipdnn_frontend::DataType::FLOAT)
+          .set_compute_data_type(hipdnn_frontend::DataType::FLOAT);
+    }
+  }
+
   // Create TensorAttributes for all graph inputs and add to symbol table.
   // Scalar constant initializers (element count == 1) are embedded directly
   // into the graph via the pass-by-value API instead of becoming runtime
@@ -1488,6 +1512,7 @@ Status HipDNNGraphImpl::Compile() {
   if (all_fusilli_compatible_) {
     graph_->set_preferred_engine_id_ext("FUSILLI_ENGINE");
   }
+
   error = graph_->create_execution_plans({HeuristicMode::FALLBACK});
   if (error.is_bad()) {
     return Status::Failure("hipDNN create_execution_plans failed: " + error.get_message());

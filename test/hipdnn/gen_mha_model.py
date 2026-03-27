@@ -14,10 +14,10 @@ except ImportError:
 
 def create_mha_model(
     batch_size=2,
-    seq_len_q=4,
-    seq_len_kv=4,
-    num_heads=2,
-    head_size=8,
+    seq_len_q=16,
+    seq_len_kv=16,
+    num_heads=4,
+    head_size=64,
     unidirectional=0,
     scale=0.0,
     output_file="mha_test.onnx",
@@ -90,10 +90,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--seq-len-q", type=int, default=4)
-    parser.add_argument("--seq-len-kv", type=int, default=4)
-    parser.add_argument("--num-heads", type=int, default=2)
-    parser.add_argument("--head-size", type=int, default=8)
+    parser.add_argument("--seq-len-q", type=int, default=16)
+    parser.add_argument("--seq-len-kv", type=int, default=16)
+    parser.add_argument("--num-heads", type=int, default=4)
+    parser.add_argument("--head-size", type=int, default=64)
     parser.add_argument("--unidirectional", type=int, default=0)
     parser.add_argument("--scale", type=float, default=0.0)
     parser.add_argument("--output", "-o", default="mha_test.onnx")
