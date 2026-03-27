@@ -164,11 +164,9 @@ TEST_F(HipDNNSimplifiedLayerNormTest, Basic) {
   // X shape: [1, 4, 8, 8], axis=-1 -> Scale shape: [8]
   const std::vector<int64_t> x_shape = {1, 4, 8, 8};
   const std::vector<int64_t> scale_shape = {8};
-  size_t x_n = 1 * 4 * 8 * 8;
-  size_t scale_n = 8;
 
-  auto x = GenerateTestData(x_n, -2.0f, 0.016f);
-  auto scale = GenerateTestData(scale_n, 0.5f, 0.1f);
+  auto x = GenerateTestData(1 * 4 * 8 * 8, -2.0f, 0.016f);
+  auto scale = GenerateTestData(8, 0.5f, 0.1f);
 
   RunAndCompare(SIMPLIFIED_LAYER_NORM_TEST_MODEL_PATH,
                 x_shape, x, scale_shape, scale);

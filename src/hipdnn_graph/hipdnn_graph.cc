@@ -786,8 +786,16 @@ static Status AddSdpaNode(
 
 // Add SimplifiedLayerNormalization (RMS Norm) to hipDNN graph.
 // Inputs: X, Scale.  Outputs: Y (and optionally inv_std_var).
-// Uses hipDNN graph.rmsnorm() with INFERENCE phase when only Y is needed,
-// or TRAINING phase when the optional inv_std_var output is also requested.
+//
+// hipDNN's RMSNorm always normalizes over axis 1 (channel) and expects
+// Scale with shape [1, C, 1, 1].  ONNX's SimplifiedLayerNormalization
+// normalizes over dimensions [axis:rank] with Scale shape matching those
+// dims.  To bridge this gap, we reshape:
+//   X: [d0, d1, ..., d_{axis-1}, d_axis, ..., d_{rank-1}]
+//     -> [N, C, 1, 1]  where N = product(d0..d_{axis-1}), C = product(d_axis..d_{rank-1})
+//   Scale: [d_axis, ..., d_{rank-1}]
+//     -> [1, C, 1, 1]
+//   Y output: [N, C, 1, 1] (caller's Build loop sets final shape from ORT graph)
 static Status AddRMSNormNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
@@ -801,8 +809,8 @@ static Status AddRMSNormNode(
     return Status::Failure("SimplifiedLayerNormalization requires exactly 2 inputs (X, Scale)");
   }
 
-  const auto& x_attr = input_attrs[0];
-  const auto& scale_attr = input_attrs[1];
+  auto x_attr = input_attrs[0];
+  auto scale_attr = input_attrs[1];
 
   if (IsScalarAttr(x_attr)) {
     return Status::Failure("SimplifiedLayerNormalization input X must be a tensor, not a scalar");
@@ -812,10 +820,34 @@ static Status AddRMSNormNode(
   std::vector<Ort::ConstValueInfo> node_outputs = node.GetOutputs();
   bool need_inv_std_var = (node_outputs.size() > 1);
 
-  // Extract epsilon attribute (default 1e-5 per ONNX spec)
-  float epsilon = GetFloatAttrOrDefault(node, "epsilon", 1e-5f);
+  // Resolve the axis attribute.
+  auto x_dims = x_attr->get_dim();
+  int64_t rank = static_cast<int64_t>(x_dims.size());
+  int64_t axis = GetIntAttrOrDefault(node, "axis", -1);
+  if (axis < 0) {
+    axis += rank;
+  }
 
-  // Create epsilon as a pass-by-value scalar tensor
+  // Compute the batch (N) and channel (C) sizes for hipDNN's view.
+  int64_t batch_size = 1;
+  for (int64_t i = 0; i < axis; ++i) {
+    batch_size *= x_dims[i];
+  }
+  int64_t channel_size = 1;
+  for (int64_t i = axis; i < rank; ++i) {
+    channel_size *= x_dims[i];
+  }
+
+  // Reshape X to [N, C, 1, 1] for hipDNN RMSNorm (normalizes over axis 1).
+  x_attr->set_dim({batch_size, channel_size, 1, 1});
+  x_attr->set_stride(ComputeStrides({batch_size, channel_size, 1, 1}));
+
+  // Reshape Scale to [1, C, 1, 1] (per-channel scaling).
+  scale_attr->set_dim({1, channel_size, 1, 1});
+  scale_attr->set_stride(ComputeStrides({1, channel_size, 1, 1}));
+
+  // Extract epsilon attribute (default 1e-5 per ONNX spec).
+  float epsilon = GetFloatAttrOrDefault(node, "epsilon", 1e-5f);
   auto epsilon_attr = CreateScalarTensorAttr(next_uid++, epsilon);
 
   // Build RMSNorm attributes.  Use TRAINING phase when the optional
@@ -828,6 +860,13 @@ static Status AddRMSNormNode(
   // Call graph.rmsnorm() which returns [y, invRms].
   // invRms is nullptr in INFERENCE mode.
   auto [y_attr, inv_rms_attr] = graph.rmsnorm(x_attr, scale_attr, rmsnorm_attrs);
+
+  // The output Y from hipDNN has shape [N, C, 1, 1].  The caller's Build
+  // loop will overwrite dim/stride from the ORT graph output info, restoring
+  // the original shape.  We set dim/stride here so the hipDNN graph builder
+  // sees consistent shapes during graph construction.
+  y_attr->set_dim({batch_size, channel_size, 1, 1});
+  y_attr->set_stride(ComputeStrides({batch_size, channel_size, 1, 1}));
   output_attrs.push_back(y_attr);
 
   if (need_inv_std_var) {
