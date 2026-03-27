@@ -780,6 +780,60 @@ static Status AddSdpaNode(
   o_attr->set_stride({seq_len_q * q_hidden, head_size, q_hidden, 1});
 
   output_attr = o_attr;
+
+  return Status::Success();
+}
+
+// Add SimplifiedLayerNormalization (RMS Norm) to hipDNN graph.
+// Inputs: X, Scale.  Outputs: Y (and optionally inv_std_var).
+// Uses hipDNN graph.rmsnorm() with INFERENCE phase when only Y is needed,
+// or TRAINING phase when the optional inv_std_var output is also requested.
+static Status AddRMSNormNode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    std::vector<TensorAttrPtr>& output_attrs,
+    int64_t& next_uid) {
+  using namespace hipdnn_frontend::graph;
+  using hipdnn_frontend::NormFwdPhase;
+
+  if (input_attrs.size() != 2) {
+    return Status::Failure("SimplifiedLayerNormalization requires exactly 2 inputs (X, Scale)");
+  }
+
+  const auto& x_attr = input_attrs[0];
+  const auto& scale_attr = input_attrs[1];
+
+  if (IsScalarAttr(x_attr)) {
+    return Status::Failure("SimplifiedLayerNormalization input X must be a tensor, not a scalar");
+  }
+
+  // Determine whether the optional inv_std_var output is requested.
+  std::vector<Ort::ConstValueInfo> node_outputs = node.GetOutputs();
+  bool need_inv_std_var = (node_outputs.size() > 1);
+
+  // Extract epsilon attribute (default 1e-5 per ONNX spec)
+  float epsilon = GetFloatAttrOrDefault(node, "epsilon", 1e-5f);
+
+  // Create epsilon as a pass-by-value scalar tensor
+  auto epsilon_attr = CreateScalarTensorAttr(next_uid++, epsilon);
+
+  // Build RMSNorm attributes.  Use TRAINING phase when the optional
+  // inv_std_var output is needed (hipDNN only produces it in that mode).
+  RMSNormAttributes rmsnorm_attrs;
+  rmsnorm_attrs
+      .set_forward_phase(need_inv_std_var ? NormFwdPhase::TRAINING : NormFwdPhase::INFERENCE)
+      .set_epsilon(epsilon_attr);
+
+  // Call graph.rmsnorm() which returns [y, invRms].
+  // invRms is nullptr in INFERENCE mode.
+  auto [y_attr, inv_rms_attr] = graph.rmsnorm(x_attr, scale_attr, rmsnorm_attrs);
+  output_attrs.push_back(y_attr);
+
+  if (need_inv_std_var) {
+    assert(inv_rms_attr != nullptr && "TRAINING phase must produce inv_rms output");
+    output_attrs.push_back(inv_rms_attr);
+  }
   return Status::Success();
 }
 
@@ -832,6 +886,10 @@ Status AddNode(
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
+  }
+
+  if (op_type == "SimplifiedLayerNormalization") {
+    return AddRMSNormNode(graph, node, input_attrs, output_attrs, next_uid);
   }
 
   return Status::Failure("Unsupported op type: " + op_type);

@@ -592,6 +592,74 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
   }
 }
 
+// Check if a SimplifiedLayerNormalization (RMS Norm) node is supported.
+// This is a com.microsoft contrib op registered in kOnnxDomain.
+// Inputs: X (tensor), Scale (tensor).
+// Outputs: Y (tensor), optional inv_std_var.
+// Attributes: axis, epsilon, stash_type.
+static bool IsSupportedSimplifiedLayerNorm(Ort::ConstNode node) {
+  try {
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    // Requires exactly 2 inputs (X, Scale) and 1-2 outputs (Y, optional inv_std_var)
+    if (inputs.size() != 2 || outputs.empty() || outputs.size() > 2) {
+      return false;
+    }
+
+    // Check data types - X and Scale must be float or float16
+    ONNXTensorElementDataType x_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType scale_type = GetTensorElementType(inputs[1]);
+    ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
+
+    if (x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      return false;
+    }
+
+    // Scale and Y types must match (per ONNX spec, Y type propagates from Scale)
+    if (scale_type != y_type) {
+      return false;
+    }
+
+    // Scale must also be a supported float type
+    if (scale_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        scale_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      return false;
+    }
+
+    // Both inputs must have static shapes
+    auto x_shape = GetTensorShape(inputs[0]);
+    auto scale_shape = GetTensorShape(inputs[1]);
+    if (!x_shape.has_value() || !scale_shape.has_value()) {
+      return false;
+    }
+
+    // X must be at least rank 2
+    if (x_shape->size() < 2) {
+      return false;
+    }
+
+    // axis attribute determines the normalization dimensions.
+    // hipDNN RMSNorm expects Scale with shape [1, C, 1, 1, ...] for channel-wise
+    // normalization.  For now, accept axis=-1 (the common case in transformers)
+    // with any rank.
+    int64_t axis = GetIntAttrOrDefault(node, "axis", -1);
+    int64_t rank = static_cast<int64_t>(x_shape->size());
+    if (axis < 0) {
+      axis += rank;
+    }
+    if (axis < 0 || axis >= rank) {
+      return false;
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if an op is supported by this EP
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
@@ -629,6 +697,11 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   }
   if (op_type == "GroupQueryAttention") {
     return IsSupportedGroupQueryAttention(node);
+  }
+
+  // SimplifiedLayerNormalization (RMS Norm) - com.microsoft contrib op
+  if (op_type == "SimplifiedLayerNormalization") {
+    return IsSupportedSimplifiedLayerNorm(node);
   }
 
   return false;

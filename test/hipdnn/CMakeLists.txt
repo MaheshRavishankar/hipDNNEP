@@ -223,3 +223,25 @@ target_compile_definitions(hipdnn_ep_tests PRIVATE
   GQA_MHA_TEST_MODEL_PATH="${GQA_MHA_TEST_MODEL}"
   GQA_CROSS_TEST_MODEL_PATH="${GQA_CROSS_TEST_MODEL}"
 )
+
+# hipDNN (SimplifiedLayerNormalization / RMS Norm) test sources
+target_sources(hipdnn_ep_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_simplified_layer_norm.cc
+)
+
+# Generate SimplifiedLayerNormalization test model
+set(SIMPLIFIED_LAYER_NORM_MODEL "${CMAKE_CURRENT_BINARY_DIR}/simplified_layer_norm_test.onnx")
+add_custom_command(
+  OUTPUT ${SIMPLIFIED_LAYER_NORM_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_simplified_layer_norm_model.py
+          --output ${SIMPLIFIED_LAYER_NORM_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_simplified_layer_norm_model.py
+  COMMENT "Generating SimplifiedLayerNormalization test model"
+  VERBATIM
+)
+add_custom_target(generate_simplified_layer_norm_test_model DEPENDS ${SIMPLIFIED_LAYER_NORM_MODEL})
+add_dependencies(hipdnn_ep_tests generate_simplified_layer_norm_test_model)
+
+target_compile_definitions(hipdnn_ep_tests PRIVATE
+  SIMPLIFIED_LAYER_NORM_TEST_MODEL_PATH="${SIMPLIFIED_LAYER_NORM_MODEL}"
+)
