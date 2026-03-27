@@ -4,8 +4,6 @@
 
 """Generate SimplifiedLayerNormalization (RMS Norm) ONNX models for testing."""
 
-import numpy as np
-
 try:
     import onnx
     from onnx import helper, TensorProto

@@ -640,16 +640,23 @@ static bool IsSupportedSimplifiedLayerNorm(Ort::ConstNode node) {
       return false;
     }
 
-    // axis attribute determines the normalization dimensions.
-    // hipDNN RMSNorm expects Scale with shape [1, C, 1, 1, ...] for channel-wise
-    // normalization.  For now, accept axis=-1 (the common case in transformers)
-    // with any rank.
+    // Validate axis: any axis in [0, rank) is supported.  The graph builder
+    // reshapes X to [N, C, 1, 1] where N = product(dims before axis) and
+    // C = product(dims from axis onward), so arbitrary axis values work.
     int64_t axis = GetIntAttrOrDefault(node, "axis", -1);
     int64_t rank = static_cast<int64_t>(x_shape->size());
     if (axis < 0) {
       axis += rank;
     }
     if (axis < 0 || axis >= rank) {
+      return false;
+    }
+
+    // stash_type controls the precision of internal mean-of-squares
+    // computation: 1 = float32 (default).  hipDNN always computes
+    // reductions in float32, so we only support stash_type == 1.
+    int64_t stash_type = GetIntAttrOrDefault(node, "stash_type", 1);
+    if (stash_type != 1) {
       return false;
     }
 

@@ -817,8 +817,11 @@ static Status AddRMSNormNode(
   }
 
   // Determine whether the optional inv_std_var output is requested.
+  // In ONNX, optional outputs may appear in the list with an empty name
+  // to indicate they are not requested.
   std::vector<Ort::ConstValueInfo> node_outputs = node.GetOutputs();
-  bool need_inv_std_var = (node_outputs.size() > 1);
+  bool need_inv_std_var =
+      (node_outputs.size() > 1 && !node_outputs[1].GetName().empty());
 
   // Resolve the axis attribute.
   auto x_dims = x_attr->get_dim();
@@ -861,10 +864,10 @@ static Status AddRMSNormNode(
   // invRms is nullptr in INFERENCE mode.
   auto [y_attr, inv_rms_attr] = graph.rmsnorm(x_attr, scale_attr, rmsnorm_attrs);
 
-  // The output Y from hipDNN has shape [N, C, 1, 1].  The caller's Build
-  // loop will overwrite dim/stride from the ORT graph output info, restoring
-  // the original shape.  We set dim/stride here so the hipDNN graph builder
-  // sees consistent shapes during graph construction.
+  // Set Y shape to [N, C, 1, 1] matching the reshaped X so hipDNN graph
+  // validation passes.  The caller's Build loop preserves this (dim is
+  // non-empty), but Execute uses output_shapes_ (the original ORT shape)
+  // for output tensor allocation, so the reshape is transparent to ORT.
   y_attr->set_dim({batch_size, channel_size, 1, 1});
   y_attr->set_stride(ComputeStrides({batch_size, channel_size, 1, 1}));
   output_attrs.push_back(y_attr);
