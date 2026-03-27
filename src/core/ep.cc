@@ -617,14 +617,15 @@ static bool IsSupportedSimplifiedLayerNorm(Ort::ConstNode node) {
       return false;
     }
 
-    // Scale and Y types must match (per ONNX spec, Y type propagates from Scale)
-    if (scale_type != y_type) {
+    // X and Scale must have matching types.  ONNX allows mixed precision
+    // (e.g., X=float16 with Scale=float32) but hipDNN's rmsnorm API does
+    // not handle type casting between inputs; reject to avoid wrong results.
+    if (x_type != scale_type) {
       return false;
     }
 
-    // Scale must also be a supported float type
-    if (scale_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
-        scale_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    // Y type must match Scale type (per ONNX spec, Y type propagates from X).
+    if (x_type != y_type) {
       return false;
     }
 

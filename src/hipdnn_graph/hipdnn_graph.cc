@@ -1437,19 +1437,30 @@ Status HipDNNGraphImpl::Build(
         AddNode(*graph_, node, input_attrs, output_attrs, next_uid_);
     if (status.failed()) return status;
 
-    // Set UID, name on output TensorAttributes and add to symbol table
+    // Set UID, name on output TensorAttributes and add to symbol table.
+    // Filter out empty-named optional outputs (ONNX convention for
+    // "not requested").  Only active (non-empty-named) outputs are matched
+    // against the attrs returned by the node builder.
     std::vector<Ort::ConstValueInfo> node_outputs = node.GetOutputs();
-    if (output_attrs.size() != node_outputs.size()) {
+    std::vector<Ort::ConstValueInfo> active_outputs;
+    active_outputs.reserve(node_outputs.size());
+    for (const auto& out : node_outputs) {
+      if (!out.GetName().empty()) {
+        active_outputs.push_back(out);
+      }
+    }
+
+    if (output_attrs.size() != active_outputs.size()) {
       return Status::Failure("Output count mismatch for node " + node.GetName() +
-                             ": expected " + std::to_string(node_outputs.size()) +
+                             ": expected " + std::to_string(active_outputs.size()) +
                              ", got " + std::to_string(output_attrs.size()));
     }
 
     for (size_t i = 0; i < output_attrs.size(); ++i) {
-      std::string name = node_outputs[i].GetName();
+      std::string name = active_outputs[i].GetName();
 
       // Get output data type
-      auto dtype = ToHipDNNDataType(GetTensorElementType(node_outputs[i]));
+      auto dtype = ToHipDNNDataType(GetTensorElementType(active_outputs[i]));
       if (!dtype.has_value()) {
         return Status::Failure("Unsupported data type for output: " + name);
       }
@@ -1460,7 +1471,7 @@ Status HipDNNGraphImpl::Build(
       // for NHWC), keep them.  Otherwise read shape from the ORT graph and
       // compute row-major strides.
       if (output_attrs[i]->get_dim().empty()) {
-        auto shape = GetTensorShape(node_outputs[i]);
+        auto shape = GetTensorShape(active_outputs[i]);
         if (!shape.has_value()) {
           return Status::Failure("Output must have static shape: " + name);
         }
