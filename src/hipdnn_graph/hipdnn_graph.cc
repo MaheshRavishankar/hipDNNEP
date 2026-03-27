@@ -568,6 +568,8 @@ Status AddMatMulNode(
 // Keep in sync with IsFusilliCompatibleMLIROp below.
 // MatMul/Gemm are included because hipBLAS-LT is currently disabled;
 // revisit when re-enabled.
+// Note: MultiHeadAttention (SDPA) is intentionally absent — it uses
+// hipDNN's dedicated SDPA engine, not Fusilli.
 bool IsFusilliCompatibleOp(const std::string& op_type) {
   return op_type == "Conv" || op_type == "MatMul" || op_type == "Gemm" ||
          op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
@@ -686,9 +688,12 @@ static Status AddSdpaNode(
     return Status::Failure("MultiHeadAttention requires at least 3 inputs (Q, K, V)");
   }
 
-  auto q_attr = input_attrs[0];
-  auto k_attr = input_attrs[1];
-  auto v_attr = input_attrs[2];
+  // The input attrs are shared pointers stored in the symbol table, so we
+  // must not mutate them in place — other downstream nodes may reference
+  // the same objects.  Copy before reshaping.
+  auto q_attr = std::make_shared<hipdnn_frontend::graph::TensorAttributes>(*input_attrs[0]);
+  auto k_attr = std::make_shared<hipdnn_frontend::graph::TensorAttributes>(*input_attrs[1]);
+  auto v_attr = std::make_shared<hipdnn_frontend::graph::TensorAttributes>(*input_attrs[2]);
 
   // Q, K, V must be 3D tensors.
   if (q_attr->get_dim().size() != 3 || k_attr->get_dim().size() != 3 ||
@@ -741,20 +746,10 @@ static Status AddSdpaNode(
     sdpa_attrs.causal_mask = true;
   }
 
-  // Optional attention_bias.  In the fused graph, absent optional inputs
-  // (bias, key_padding_mask) are excluded, so if attention_bias is present
-  // it appears as the 4th input (index 3).
-  if (input_attrs.size() > 3) {
-    auto bias_attr = input_attrs[3];
-    // Attention bias has shape [B or 1, H or 1, S_q, S_kv].
-    // If the attr is 4D, pass it through; otherwise skip.
-    if (bias_attr->get_dim().size() == 4) {
-      sdpa_attrs.set_bias(bias_attr);
-    }
-  }
-
   // No dropout for inference.
   // No stats generation needed (inference only).
+  // Attention bias is not yet supported — requires verifying how ORT
+  // maps absent optional inputs in the fused graph.
 
   // Call graph.sdpa() — returns [output, stats].
   auto [o_attr, stats_attr] = graph.sdpa(q_attr, k_attr, v_attr, sdpa_attrs);

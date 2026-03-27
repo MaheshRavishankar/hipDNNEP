@@ -114,6 +114,7 @@ target_sources(hipdnn_ep_tests PRIVATE
 set(MHA_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/mha_test.onnx")
 set(MHA_CAUSAL_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/mha_causal_test.onnx")
 set(MHA_SCALE_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/mha_scale_test.onnx")
+set(MHA_CROSS_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/mha_cross_test.onnx")
 
 add_custom_command(
   OUTPUT ${MHA_TEST_MODEL}
@@ -142,12 +143,23 @@ add_custom_command(
   VERBATIM
 )
 
+add_custom_command(
+  OUTPUT ${MHA_CROSS_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
+          --seq-len-kv 8 --output ${MHA_CROSS_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
+  COMMENT "Generating MHA cross-attention test model"
+  VERBATIM
+)
+
 add_custom_target(generate_mha_test_models DEPENDS
-  ${MHA_TEST_MODEL} ${MHA_CAUSAL_TEST_MODEL} ${MHA_SCALE_TEST_MODEL})
+  ${MHA_TEST_MODEL} ${MHA_CAUSAL_TEST_MODEL} ${MHA_SCALE_TEST_MODEL}
+  ${MHA_CROSS_TEST_MODEL})
 add_dependencies(hipdnn_ep_tests generate_mha_test_models)
 
 target_compile_definitions(hipdnn_ep_tests PRIVATE
   MHA_TEST_MODEL_PATH="${MHA_TEST_MODEL}"
   MHA_CAUSAL_TEST_MODEL_PATH="${MHA_CAUSAL_TEST_MODEL}"
   MHA_SCALE_TEST_MODEL_PATH="${MHA_SCALE_TEST_MODEL}"
+  MHA_CROSS_TEST_MODEL_PATH="${MHA_CROSS_TEST_MODEL}"
 )

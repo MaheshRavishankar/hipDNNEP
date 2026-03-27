@@ -362,7 +362,10 @@ static bool IsSupportedMultiHeadAttention(Ort::ConstNode node) {
       return false;
     }
 
-    // Input 5 (attention_bias) is optionally supported — skip check.
+    // Reject attention_bias (input 5) — not yet supported.
+    if (is_present(5)) {
+      return false;
+    }
 
     // Reject past_key (6), past_value (7), past_sequence_length (8),
     // cache_indirection (9).

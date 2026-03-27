@@ -25,6 +25,10 @@
 #define MHA_SCALE_TEST_MODEL_PATH "./mha_scale_test.onnx"
 #endif
 
+#ifndef MHA_CROSS_TEST_MODEL_PATH
+#define MHA_CROSS_TEST_MODEL_PATH "./mha_cross_test.onnx"
+#endif
+
 class HipDNNMhaTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -227,5 +231,23 @@ TEST_F(HipDNNMhaTest, ScaledSdpa) {
   auto v = GenerateTestData(v_n, 0.0f, 0.008f);
 
   RunAndCompare(MHA_SCALE_TEST_MODEL_PATH, q_shape, q, k_shape, k,
+                v_shape, v);
+}
+
+// Cross-attention: S_q != S_kv.
+TEST_F(HipDNNMhaTest, CrossAttentionSdpa) {
+  // B=2, S_q=4, S_kv=8, H=2, D=8, hidden=16
+  const std::vector<int64_t> q_shape = {2, 4, 16};
+  const std::vector<int64_t> k_shape = {2, 8, 16};
+  const std::vector<int64_t> v_shape = {2, 8, 16};
+  size_t q_n = 2 * 4 * 16;
+  size_t k_n = 2 * 8 * 16;
+  size_t v_n = 2 * 8 * 16;
+
+  auto q = GenerateTestData(q_n, -0.4f, 0.007f);
+  auto k = GenerateTestData(k_n, 0.1f, 0.004f);
+  auto v = GenerateTestData(v_n, -0.2f, 0.003f);
+
+  RunAndCompare(MHA_CROSS_TEST_MODEL_PATH, q_shape, q, k_shape, k,
                 v_shape, v);
 }
