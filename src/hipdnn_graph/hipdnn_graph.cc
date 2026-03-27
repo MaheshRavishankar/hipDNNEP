@@ -6,8 +6,10 @@
 
 #include <hipdnn_backend.h>
 #include <hipdnn_frontend.hpp>
+#include <hipdnn_frontend/attributes/SdpaAttributes.hpp>
 
 #include <cassert>
+#include <cmath>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -657,6 +659,116 @@ static Status AddUnaryPointwiseNode(
   return Status::Success();
 }
 
+// Add MultiHeadAttention (SDPA) operation to hipDNN graph.
+//
+// ORT's MultiHeadAttention takes Q, K, V in [B, S, hidden_size] format
+// where hidden_size = num_heads * head_size.  hipDNN's graph.sdpa() expects
+// [B, H, S, D].  We reshape via stride manipulation (zero-copy) to convert
+// between the two layouts:
+//
+//   [B, S, H*D] row-major strides: [S*H*D, H*D, 1]
+//   viewed as [B, H, S, D] with strides: [S*H*D, D, H*D, 1]
+//
+// The output from SDPA is [B, H, S, D] and needs to be stored in [B, S, H*D]
+// order.  We achieve this by setting the output tensor's strides to
+// [S*H*D, D, H*D, 1], which tells hipDNN to write the output in an order
+// that, when interpreted as contiguous [B, S, H*D], is correct.
+static Status AddSdpaNode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    TensorAttrPtr& output_attr,
+    int64_t& next_uid) {
+  using namespace hipdnn_frontend::graph;
+
+  // We need at least Q, K, V.
+  if (input_attrs.size() < 3) {
+    return Status::Failure("MultiHeadAttention requires at least 3 inputs (Q, K, V)");
+  }
+
+  auto q_attr = input_attrs[0];
+  auto k_attr = input_attrs[1];
+  auto v_attr = input_attrs[2];
+
+  // Q, K, V must be 3D tensors.
+  if (q_attr->get_dim().size() != 3 || k_attr->get_dim().size() != 3 ||
+      v_attr->get_dim().size() != 3) {
+    return Status::Failure("MultiHeadAttention inputs must be 3D [B, S, hidden_size]");
+  }
+
+  int64_t num_heads = GetIntAttrOrDefault(node, "num_heads", 0);
+  if (num_heads <= 0) {
+    return Status::Failure("MultiHeadAttention requires num_heads > 0");
+  }
+
+  auto q_dim = q_attr->get_dim();
+  int64_t batch_size = q_dim[0];
+  int64_t seq_len_q = q_dim[1];
+  int64_t hidden_size = q_dim[2];
+  int64_t head_size = hidden_size / num_heads;
+
+  auto k_dim = k_attr->get_dim();
+  int64_t seq_len_kv = k_dim[1];
+
+  // Reshape Q from [B, S, H*D] to [B, H, S, D] via stride manipulation.
+  // Row-major [B, S, H*D] has strides [S*H*D, H*D, 1].
+  // View as [B, S, H, D] has strides [S*H*D, H*D, D, 1].
+  // Transpose dims 1,2 to [B, H, S, D] has strides [S*H*D, D, H*D, 1].
+  q_attr->set_dim({batch_size, num_heads, seq_len_q, head_size});
+  q_attr->set_stride({seq_len_q * hidden_size, head_size, hidden_size, 1});
+
+  k_attr->set_dim({batch_size, num_heads, seq_len_kv, head_size});
+  k_attr->set_stride({seq_len_kv * hidden_size, head_size, hidden_size, 1});
+
+  v_attr->set_dim({batch_size, num_heads, seq_len_kv, head_size});
+  v_attr->set_stride({seq_len_kv * hidden_size, head_size, hidden_size, 1});
+
+  // Build SdpaAttributes.
+  SdpaAttributes sdpa_attrs;
+
+  // Scale: default is 1/sqrt(head_size), can be overridden by attribute.
+  float scale = GetFloatAttrOrDefault(node, "scale", 0.0f);
+  if (scale != 0.0f) {
+    sdpa_attrs.attn_scale_value = scale;
+  } else {
+    sdpa_attrs.attn_scale_value =
+        1.0f / std::sqrt(static_cast<float>(head_size));
+  }
+
+  // Causal masking: unidirectional=1 means causal.
+  int64_t unidirectional = GetIntAttrOrDefault(node, "unidirectional", 0);
+  if (unidirectional != 0) {
+    sdpa_attrs.causal_mask = true;
+  }
+
+  // Optional attention_bias.  In the fused graph, absent optional inputs
+  // (bias, key_padding_mask) are excluded, so if attention_bias is present
+  // it appears as the 4th input (index 3).
+  if (input_attrs.size() > 3) {
+    auto bias_attr = input_attrs[3];
+    // Attention bias has shape [B or 1, H or 1, S_q, S_kv].
+    // If the attr is 4D, pass it through; otherwise skip.
+    if (bias_attr->get_dim().size() == 4) {
+      sdpa_attrs.set_bias(bias_attr);
+    }
+  }
+
+  // No dropout for inference.
+  // No stats generation needed (inference only).
+
+  // Call graph.sdpa() — returns [output, stats].
+  auto [o_attr, stats_attr] = graph.sdpa(q_attr, k_attr, v_attr, sdpa_attrs);
+
+  // Reshape output from [B, H, S_q, D] to [B, S_q, H*D] via strides.
+  // We set dims to [B, H, S_q, D] with strides [S_q*H*D, D, H*D, 1]
+  // so that when ORT reads it as contiguous [B, S_q, H*D], the data is correct.
+  o_attr->set_dim({batch_size, num_heads, seq_len_q, head_size});
+  o_attr->set_stride({seq_len_q * hidden_size, head_size, hidden_size, 1});
+
+  output_attr = o_attr;
+  return Status::Success();
+}
+
 // Dispatch to appropriate Add*Node based on op_type.
 // Takes input tensor attributes, returns output tensor attributes.
 Status AddNode(
@@ -695,6 +807,14 @@ Status AddNode(
   if (GetUnaryPointwiseMode(op_type).has_value()) {
     TensorAttrPtr y_attr;
     auto status = AddUnaryPointwiseNode(graph, node, input_attrs, y_attr);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (op_type == "MultiHeadAttention") {
+    TensorAttrPtr y_attr;
+    auto status = AddSdpaNode(graph, node, input_attrs, y_attr, next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();

@@ -104,3 +104,50 @@ endforeach()
 
 add_custom_target(generate_unary_pointwise_test_models DEPENDS ${_unary_pw_models})
 add_dependencies(hipdnn_ep_tests generate_unary_pointwise_test_models)
+
+# hipDNN (MultiHeadAttention / SDPA) test sources
+target_sources(hipdnn_ep_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_mha.cc
+)
+
+# Generate MultiHeadAttention test models
+set(MHA_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/mha_test.onnx")
+set(MHA_CAUSAL_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/mha_causal_test.onnx")
+set(MHA_SCALE_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/mha_scale_test.onnx")
+
+add_custom_command(
+  OUTPUT ${MHA_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
+          --output ${MHA_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
+  COMMENT "Generating MHA basic test model"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${MHA_CAUSAL_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
+          --unidirectional 1 --output ${MHA_CAUSAL_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
+  COMMENT "Generating MHA causal test model"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${MHA_SCALE_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
+          --scale 0.5 --output ${MHA_SCALE_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_mha_model.py
+  COMMENT "Generating MHA scaled test model"
+  VERBATIM
+)
+
+add_custom_target(generate_mha_test_models DEPENDS
+  ${MHA_TEST_MODEL} ${MHA_CAUSAL_TEST_MODEL} ${MHA_SCALE_TEST_MODEL})
+add_dependencies(hipdnn_ep_tests generate_mha_test_models)
+
+target_compile_definitions(hipdnn_ep_tests PRIVATE
+  MHA_TEST_MODEL_PATH="${MHA_TEST_MODEL}"
+  MHA_CAUSAL_TEST_MODEL_PATH="${MHA_CAUSAL_TEST_MODEL}"
+  MHA_SCALE_TEST_MODEL_PATH="${MHA_SCALE_TEST_MODEL}"
+)
