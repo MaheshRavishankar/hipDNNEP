@@ -792,10 +792,12 @@ static Status AddSdpaNode(
 // normalizes over dimensions [axis:rank] with Scale shape matching those
 // dims.  To bridge this gap, we reshape:
 //   X: [d0, d1, ..., d_{axis-1}, d_axis, ..., d_{rank-1}]
-//     -> [N, C, 1, 1]  where N = product(d0..d_{axis-1}), C = product(d_axis..d_{rank-1})
+//     -> [1, C, N, 1]  where N = product(d0..d_{axis-1}), C = product(d_axis..d_{rank-1})
 //   Scale: [d_axis, ..., d_{rank-1}]
 //     -> [1, C, 1, 1]
-//   Y output: [N, C, 1, 1] (caller's Build loop sets final shape from ORT graph)
+//   Y output: [1, C, N, 1] (caller's Build loop sets final shape from ORT graph)
+// The batch dimensions are placed in the spatial (H) position so that
+// hipDNN normalizes over C for each independent batch position.
 static Status AddRMSNormNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
@@ -841,9 +843,11 @@ static Status AddRMSNormNode(
     channel_size *= x_dims[i];
   }
 
-  // Reshape X to [N, C, 1, 1] for hipDNN RMSNorm (normalizes over axis 1).
-  x_attr->set_dim({batch_size, channel_size, 1, 1});
-  x_attr->set_stride(ComputeStrides({batch_size, channel_size, 1, 1}));
+  // Reshape X to [1, C, N, 1] for hipDNN RMSNorm (normalizes over axis 1).
+  // Batch dims go into the spatial (H) position so hipDNN normalizes over C
+  // independently for each batch element.
+  x_attr->set_dim({1, channel_size, batch_size, 1});
+  x_attr->set_stride(ComputeStrides({1, channel_size, batch_size, 1}));
 
   // Reshape Scale to [1, C, 1, 1] (per-channel scaling).
   scale_attr->set_dim({1, channel_size, 1, 1});
@@ -858,18 +862,19 @@ static Status AddRMSNormNode(
   RMSNormAttributes rmsnorm_attrs;
   rmsnorm_attrs
       .set_forward_phase(need_inv_std_var ? NormFwdPhase::TRAINING : NormFwdPhase::INFERENCE)
-      .set_epsilon(epsilon_attr);
+      .set_epsilon(epsilon_attr)
+      .set_compute_data_type(x_attr->get_data_type());
 
   // Call graph.rmsnorm() which returns [y, invRms].
   // invRms is nullptr in INFERENCE mode.
   auto [y_attr, inv_rms_attr] = graph.rmsnorm(x_attr, scale_attr, rmsnorm_attrs);
 
-  // Set Y shape to [N, C, 1, 1] matching the reshaped X so hipDNN graph
+  // Set Y shape to [1, C, N, 1] matching the reshaped X so hipDNN graph
   // validation passes.  The caller's Build loop preserves this (dim is
   // non-empty), but Execute uses output_shapes_ (the original ORT shape)
   // for output tensor allocation, so the reshape is transparent to ORT.
-  y_attr->set_dim({batch_size, channel_size, 1, 1});
-  y_attr->set_stride(ComputeStrides({batch_size, channel_size, 1, 1}));
+  y_attr->set_dim({1, channel_size, batch_size, 1});
+  y_attr->set_stride(ComputeStrides({1, channel_size, batch_size, 1}));
   output_attrs.push_back(y_attr);
 
   if (need_inv_std_var) {
@@ -1375,15 +1380,18 @@ Status HipDNNGraphImpl::Build(
   graph_ = std::make_unique<Graph>();
 
   // Set graph-level data types from the first graph input.  These are needed
-  // by ops like SDPA whose engine lookup depends on graph-level types.
+  // by ops like SDPA and RMSNorm whose engine lookup depends on graph-level
+  // types.  Some ops (e.g., RMSNorm) use fill_from_context to propagate data
+  // types to internally-created tensors; without graph-level defaults,
+  // engine heuristics may fail to find a matching configuration.
   // For ops that set their own compute_data_type (Conv, pointwise, etc.)
   // the per-op type takes precedence.
   if (!graph_inputs.empty()) {
     auto first_dtype = ToHipDNNDataType(GetTensorElementType(graph_inputs[0]));
     if (first_dtype.has_value()) {
       graph_->set_io_data_type(first_dtype.value())
-          .set_intermediate_data_type(hipdnn_frontend::DataType::FLOAT)
-          .set_compute_data_type(hipdnn_frontend::DataType::FLOAT);
+             .set_intermediate_data_type(first_dtype.value())
+             .set_compute_data_type(first_dtype.value());
     }
   }
 
