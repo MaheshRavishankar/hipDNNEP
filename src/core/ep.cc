@@ -262,8 +262,8 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
 // For the initial implementation we support the basic case:
 //   - Q, K, V all present as separate 3D tensors [B, S, hidden_size]
 //   - No past_key/past_value (KV cache)
-//   - No key_padding_mask
-//   - Optional attention_bias, scale, and causal masking (unidirectional)
+//   - No key_padding_mask or attention_bias
+//   - Optional scale and causal masking (unidirectional)
 static bool IsSupportedMultiHeadAttention(Ort::ConstNode node) {
   try {
     // Must be in the Microsoft contrib domain.
