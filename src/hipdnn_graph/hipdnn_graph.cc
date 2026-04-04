@@ -6,8 +6,10 @@
 
 #include <hipdnn_backend.h>
 #include <hipdnn_frontend.hpp>
+#include <hipdnn_frontend/attributes/SdpaAttributes.hpp>
 
 #include <cassert>
+#include <cmath>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -566,6 +568,8 @@ Status AddMatMulNode(
 // Keep in sync with IsFusilliCompatibleMLIROp below.
 // MatMul/Gemm are included because hipBLAS-LT is currently disabled;
 // revisit when re-enabled.
+// Note: MultiHeadAttention (SDPA) is intentionally absent — it uses
+// hipDNN's dedicated SDPA engine, not Fusilli.
 bool IsFusilliCompatibleOp(const std::string& op_type) {
   return op_type == "Conv" || op_type == "MatMul" || op_type == "Gemm" ||
          op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
@@ -657,6 +661,120 @@ static Status AddUnaryPointwiseNode(
   return Status::Success();
 }
 
+// Add MultiHeadAttention (SDPA) operation to hipDNN graph.
+//
+// ORT's MultiHeadAttention takes Q, K, V in [B, S, hidden_size] format
+// where hidden_size = num_heads * head_size.  hipDNN's graph.sdpa() expects
+// [B, H, S, D].  We reshape via stride manipulation (zero-copy) to convert
+// between the two layouts:
+//
+//   [B, S, H*D] row-major strides: [S*H*D, H*D, 1]
+//   viewed as [B, H, S, D] with strides: [S*H*D, D, H*D, 1]
+//
+// The output from SDPA is [B, H, S, D] and needs to be stored in [B, S, H*D]
+// order.  We achieve this by setting the output tensor's strides to
+// [S*H*D, D, H*D, 1], which tells hipDNN to write the output in an order
+// that, when interpreted as contiguous [B, S, H*D], is correct.
+static Status AddSdpaNode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    TensorAttrPtr& output_attr,
+    int64_t& next_uid) {
+  using namespace hipdnn_frontend::graph;
+
+  // We need at least Q, K, V.
+  if (input_attrs.size() < 3) {
+    return Status::Failure("MultiHeadAttention requires at least 3 inputs (Q, K, V)");
+  }
+
+  // Reshape the input tensor attrs in place.  This is safe because the EP
+  // currently claims nodes individually (no fusion), so each tensor attr is
+  // consumed by exactly one node.  The attrs must be the same shared_ptr
+  // objects that Build() marked as is_virtual(false); passing copies would
+  // disconnect them from the graph's input tracking and hipDNN would treat
+  // them as virtual (internal) tensors with no data pointers.
+  auto q_attr = input_attrs[0];
+  auto k_attr = input_attrs[1];
+  auto v_attr = input_attrs[2];
+
+  // Q, K, V must be 3D tensors.
+  if (q_attr->get_dim().size() != 3 || k_attr->get_dim().size() != 3 ||
+      v_attr->get_dim().size() != 3) {
+    return Status::Failure("MultiHeadAttention inputs must be 3D [B, S, hidden_size]");
+  }
+
+  int64_t num_heads = GetIntAttrOrDefault(node, "num_heads", 0);
+  if (num_heads <= 0) {
+    return Status::Failure("MultiHeadAttention requires num_heads > 0");
+  }
+
+  auto q_dim = q_attr->get_dim();
+  int64_t batch_size = q_dim[0];
+  int64_t seq_len_q = q_dim[1];
+  int64_t hidden_size = q_dim[2];
+  int64_t head_size = hidden_size / num_heads;
+
+  auto k_dim = k_attr->get_dim();
+  int64_t seq_len_kv = k_dim[1];
+
+  // Reshape Q from [B, S, H*D] to [B, H, S, D] via stride manipulation.
+  // Row-major [B, S, H*D] has strides [S*H*D, H*D, 1].
+  // View as [B, S, H, D] has strides [S*H*D, H*D, D, 1].
+  // Transpose dims 1,2 to [B, H, S, D] has strides [S*H*D, D, H*D, 1].
+  q_attr->set_dim({batch_size, num_heads, seq_len_q, head_size});
+  q_attr->set_stride({seq_len_q * hidden_size, head_size, hidden_size, 1});
+
+  k_attr->set_dim({batch_size, num_heads, seq_len_kv, head_size});
+  k_attr->set_stride({seq_len_kv * hidden_size, head_size, hidden_size, 1});
+
+  v_attr->set_dim({batch_size, num_heads, seq_len_kv, head_size});
+  v_attr->set_stride({seq_len_kv * hidden_size, head_size, hidden_size, 1});
+
+  // Determine compute data type.
+  auto compute_dtype =
+      GetComputeDataType(q_attr->get_data_type(), k_attr->get_data_type());
+  if (!compute_dtype.has_value()) {
+    return Status::Failure("Unsupported data type combination for SDPA compute");
+  }
+
+  // Build SdpaAttributes.
+  SdpaAttributes sdpa_attrs;
+  sdpa_attrs.set_compute_data_type(compute_dtype.value());
+
+  // Scale: default is 1/sqrt(head_size), can be overridden by attribute.
+  float scale = GetFloatAttrOrDefault(node, "scale", 0.0f);
+  if (scale != 0.0f) {
+    sdpa_attrs.attn_scale_value = scale;
+  } else {
+    sdpa_attrs.attn_scale_value =
+        1.0f / std::sqrt(static_cast<float>(head_size));
+  }
+
+  // Causal masking: unidirectional=1 means causal.
+  int64_t unidirectional = GetIntAttrOrDefault(node, "unidirectional", 0);
+  if (unidirectional != 0) {
+    sdpa_attrs.causal_mask = true;
+  }
+
+  // No dropout for inference.
+  // No stats generation needed (inference only).
+  // Attention bias is not yet supported — requires verifying how ORT
+  // maps absent optional inputs in the fused graph.
+
+  // Call graph.sdpa() — returns [output, stats].
+  auto [o_attr, stats_attr] = graph.sdpa(q_attr, k_attr, v_attr, sdpa_attrs);
+
+  // Reshape output from [B, H, S_q, D] to [B, S_q, H*D] via strides.
+  // We set dims to [B, H, S_q, D] with strides [S_q*H*D, D, H*D, 1]
+  // so that when ORT reads it as contiguous [B, S_q, H*D], the data is correct.
+  o_attr->set_dim({batch_size, num_heads, seq_len_q, head_size});
+  o_attr->set_stride({seq_len_q * hidden_size, head_size, hidden_size, 1});
+
+  output_attr = o_attr;
+  return Status::Success();
+}
+
 // Dispatch to appropriate Add*Node based on op_type.
 // Takes input tensor attributes, returns output tensor attributes.
 Status AddNode(
@@ -695,6 +813,14 @@ Status AddNode(
   if (GetUnaryPointwiseMode(op_type).has_value()) {
     TensorAttrPtr y_attr;
     auto status = AddUnaryPointwiseNode(graph, node, input_attrs, y_attr);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (op_type == "MultiHeadAttention") {
+    TensorAttrPtr y_attr;
+    auto status = AddSdpaNode(graph, node, input_attrs, y_attr, next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -1140,6 +1266,19 @@ Status HipDNNGraphImpl::Build(
 
   graph_ = std::make_unique<Graph>();
 
+  // Set graph-level data types from the first graph input.  These are needed
+  // by ops like SDPA whose engine lookup depends on graph-level types.
+  // For ops that set their own compute_data_type (Conv, pointwise, etc.)
+  // the per-op type takes precedence.
+  if (!graph_inputs.empty()) {
+    auto first_dtype = ToHipDNNDataType(GetTensorElementType(graph_inputs[0]));
+    if (first_dtype.has_value()) {
+      graph_->set_io_data_type(first_dtype.value())
+          .set_intermediate_data_type(hipdnn_frontend::DataType::FLOAT)
+          .set_compute_data_type(hipdnn_frontend::DataType::FLOAT);
+    }
+  }
+
   // Create TensorAttributes for all graph inputs and add to symbol table.
   // Scalar constant initializers (element count == 1) are embedded directly
   // into the graph via the pass-by-value API instead of becoming runtime
@@ -1373,6 +1512,7 @@ Status HipDNNGraphImpl::Compile() {
   if (all_fusilli_compatible_) {
     graph_->set_preferred_engine_id_ext("FUSILLI_ENGINE");
   }
+
   error = graph_->create_execution_plans({HeuristicMode::FALLBACK});
   if (error.is_bad()) {
     return Status::Failure("hipDNN create_execution_plans failed: " + error.get_message());

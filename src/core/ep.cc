@@ -258,6 +258,130 @@ static bool IsSupportedGemm(Ort::ConstNode node) {
   }
 }
 
+// Check if a MultiHeadAttention contrib op is supported by this EP.
+// For the initial implementation we support the basic case:
+//   - Q, K, V all present as separate 3D tensors [B, S, hidden_size]
+//   - No past_key/past_value (KV cache)
+//   - No key_padding_mask or attention_bias
+//   - Optional scale and causal masking (unidirectional)
+static bool IsSupportedMultiHeadAttention(Ort::ConstNode node) {
+  try {
+    // Must be in the Microsoft contrib domain.
+    std::string domain = node.GetDomain();
+    if (domain != "com.microsoft") {
+      return false;
+    }
+
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    // MHA has up to 10 inputs; first 3 (query, key, value) are required
+    // for our supported configuration.
+    if (inputs.size() < 3) {
+      return false;
+    }
+
+    // Only single output (no present_key/present_value/qk).
+    if (outputs.size() != 1) {
+      return false;
+    }
+
+    // Check Q, K, V data types — must all match and be float or float16.
+    ONNXTensorElementDataType q_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType k_type = GetTensorElementType(inputs[1]);
+    ONNXTensorElementDataType v_type = GetTensorElementType(inputs[2]);
+    ONNXTensorElementDataType o_type = GetTensorElementType(outputs[0]);
+
+    bool supported_type =
+        (q_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+         q_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) &&
+        q_type == k_type && q_type == v_type && q_type == o_type;
+
+    if (!supported_type) {
+      return false;
+    }
+
+    // Q, K, V must be 3D: [batch_size, seq_len, hidden_size]
+    auto q_shape = GetTensorShape(inputs[0]);
+    auto k_shape = GetTensorShape(inputs[1]);
+    auto v_shape = GetTensorShape(inputs[2]);
+
+    if (!q_shape.has_value() || !k_shape.has_value() || !v_shape.has_value()) {
+      return false;  // Dynamic shapes not supported yet
+    }
+
+    if (q_shape->size() != 3 || k_shape->size() != 3 || v_shape->size() != 3) {
+      return false;  // Only 3D inputs [B, S, hidden_size] supported
+    }
+
+    // num_heads is required.
+    int64_t num_heads = GetIntAttrOrDefault(node, "num_heads", 0);
+    if (num_heads <= 0) {
+      return false;
+    }
+
+    // hidden_size must be divisible by num_heads.
+    int64_t q_hidden = (*q_shape)[2];
+    if (q_hidden % num_heads != 0) {
+      return false;
+    }
+
+    // Batch dimensions must match.
+    if ((*q_shape)[0] != (*k_shape)[0] || (*q_shape)[0] != (*v_shape)[0]) {
+      return false;
+    }
+
+    // K and V sequence lengths must match.
+    if ((*k_shape)[1] != (*v_shape)[1]) {
+      return false;
+    }
+
+    // K and V hidden sizes must match Q (same head_size * num_heads).
+    // hipDNN SDPA supports different num_heads for Q vs KV (GQA), but
+    // ORT's MultiHeadAttention uses the same num_heads for all.
+    if ((*k_shape)[2] != q_hidden || (*v_shape)[2] != q_hidden) {
+      return false;
+    }
+
+    // Reject unsupported optional inputs.
+    // Input 3 (bias), 4 (key_padding_mask), 6+ (past_key, past_value, etc.)
+    // must be absent.
+    auto is_present = [&](size_t idx) {
+      if (idx >= inputs.size()) return false;
+      return GetTensorElementType(inputs[idx]) !=
+             ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    };
+
+    // Reject bias (input 3) — would require separate handling.
+    if (is_present(3)) {
+      return false;
+    }
+
+    // Reject key_padding_mask (input 4).
+    if (is_present(4)) {
+      return false;
+    }
+
+    // Reject attention_bias (input 5) — not yet supported.
+    if (is_present(5)) {
+      return false;
+    }
+
+    // Reject past_key (6), past_value (7), past_sequence_length (8),
+    // cache_indirection (9).
+    for (size_t i = 6; i < inputs.size(); ++i) {
+      if (is_present(i)) {
+        return false;
+      }
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if a unary pointwise op (Sigmoid) is supported by this EP
 static bool IsSupportedUnaryPointwise(Ort::ConstNode node) {
   try {
@@ -375,6 +499,11 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   // in src/hipdnn_graph/hipdnn_graph.cc.
   if (op_type == "Sigmoid") {
     return IsSupportedUnaryPointwise(node);
+  }
+
+  // Contrib ops (com.microsoft domain)
+  if (op_type == "MultiHeadAttention") {
+    return IsSupportedMultiHeadAttention(node);
   }
 
   return false;
