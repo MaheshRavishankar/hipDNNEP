@@ -1390,8 +1390,8 @@ Status HipDNNGraphImpl::Build(
     auto first_dtype = ToHipDNNDataType(GetTensorElementType(graph_inputs[0]));
     if (first_dtype.has_value()) {
       graph_->set_io_data_type(first_dtype.value())
-             .set_intermediate_data_type(first_dtype.value())
-             .set_compute_data_type(first_dtype.value());
+          .set_intermediate_data_type(first_dtype.value())
+          .set_compute_data_type(first_dtype.value());
     }
   }
 
