@@ -443,6 +443,11 @@ static bool IsSupportedGroupQueryAttention(Ort::ConstNode node) {
       return false;
     }
 
+    // num_heads must be divisible by kv_num_heads for even head grouping.
+    if (num_heads % kv_num_heads != 0) {
+      return false;
+    }
+
     // Q hidden_size must be divisible by num_heads.
     int64_t q_hidden = (*q_shape)[2];
     if (q_hidden % num_heads != 0) {
