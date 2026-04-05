@@ -4,6 +4,7 @@
 # hipBLAS-LT (MatMul/Gemm) test sources
 target_sources(hipdnn_ep_tests PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/test_matmul.cc
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_matmulnbits.cc
 )
 
 # Generate MatMul/Gemm test models
@@ -36,4 +37,25 @@ target_compile_definitions(hipdnn_ep_tests PRIVATE
   GEMM_TRANS_B_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_trans_b_test.onnx"
   GEMM_SCALED_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_scaled_test.onnx"
   GEMM_SCALAR_BIAS_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/gemm_scalar_bias_test.onnx"
+  MATMULNBITS_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_test.onnx"
+  MATMULNBITS_NO_ZP_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_no_zp_test.onnx"
+  MATMULNBITS_LARGE_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_large_test.onnx"
 )
+
+# Generate MatMulNBits test models
+set(MATMULNBITS_TEST_MODELS
+  ${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_test.onnx
+  ${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_no_zp_test.onnx
+  ${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_large_test.onnx
+)
+
+add_custom_command(
+  OUTPUT ${MATMULNBITS_TEST_MODELS}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_matmulnbits_model.py
+          --output-dir ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_matmulnbits_model.py
+  COMMENT "Generating MatMulNBits test models"
+  VERBATIM
+)
+add_custom_target(generate_matmulnbits_test_models DEPENDS ${MATMULNBITS_TEST_MODELS})
+add_dependencies(hipdnn_ep_tests generate_matmulnbits_test_models)

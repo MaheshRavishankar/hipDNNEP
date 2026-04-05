@@ -592,6 +592,88 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
   }
 }
 
+// Check if a MatMulNBits (com.microsoft) node is supported by this EP.
+// MatMulNBits performs Y = A @ dequantize(B) where A is fp16/fp32 and B is
+// int4-quantized weights packed as uint8.  We support the case where B, scales,
+// and zero_points are constant initializers so that we can dequantize the
+// weights at graph build time.
+static bool IsSupportedMatMulNBits(Ort::ConstNode node) {
+  try {
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    // MatMulNBits requires at least 3 inputs (A, B, scales) and 1 output
+    if (inputs.size() < 3 || outputs.size() != 1) {
+      return false;
+    }
+
+    // Check A data type - we support float and float16
+    ONNXTensorElementDataType a_type = GetTensorElementType(inputs[0]);
+    if (a_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        a_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      return false;
+    }
+
+    // B must be uint8 (packed int4)
+    ONNXTensorElementDataType b_type = GetTensorElementType(inputs[1]);
+    if (b_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
+      return false;
+    }
+
+    // scales must match A type
+    ONNXTensorElementDataType scales_type = GetTensorElementType(inputs[2]);
+    if (scales_type != a_type) {
+      return false;
+    }
+
+    // Output type must match A type
+    ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
+    if (y_type != a_type) {
+      return false;
+    }
+
+    // Check bits attribute - only 4-bit quantization supported
+    int64_t bits = GetIntAttrOrDefault(node, "bits", 4);
+    if (bits != 4) {
+      return false;
+    }
+
+    // Check required attributes exist
+    int64_t K = GetIntAttrOrDefault(node, "K", 0);
+    int64_t N = GetIntAttrOrDefault(node, "N", 0);
+    int64_t block_size = GetIntAttrOrDefault(node, "block_size", 0);
+    if (K == 0 || N == 0 || block_size == 0) {
+      return false;
+    }
+
+    // A must have static shape and be 2D
+    auto a_shape = GetTensorShape(inputs[0]);
+    if (!a_shape.has_value() || a_shape->size() != 2) {
+      return false;
+    }
+
+    // B, scales must be constant initializers (we dequantize at build time)
+    if (!inputs[1].IsConstantInitializer()) {
+      return false;
+    }
+    if (!inputs[2].IsConstantInitializer()) {
+      return false;
+    }
+
+    // zero_points (input 3), if present, must also be a constant initializer
+    if (inputs.size() >= 4) {
+      if (!inputs[3].IsConstantInitializer()) {
+        return false;
+      }
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if an op is supported by this EP
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
@@ -608,6 +690,12 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
     if (op_type == "Gemm") {
       return IsSupportedGemm(node);
     }
+  }
+
+  // MatMulNBits uses the hipDNN graph path (not hipBLAS-LT), so it does not
+  // require hipblaslt_handle_.
+  if (op_type == "MatMulNBits") {
+    return IsSupportedMatMulNBits(node);
   }
 
   // Pointwise binary ops.  Keep this list in sync with GetPointwiseMode()

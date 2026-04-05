@@ -8,11 +8,15 @@
 #include <hipdnn_frontend.hpp>
 #include <hipdnn_frontend/attributes/SdpaAttributes.hpp>
 
+#include <hip/hip_runtime.h>
+
 #include <cassert>
 #include <cmath>
+#include <cstring>
 #include <numeric>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #ifdef HIPDNN_EP_HAS_TORCH_MLIR
 #include "mlir/IR/BuiltinTypes.h"
@@ -562,6 +566,301 @@ Status AddMatMulNode(
   return Status::Success();
 }
 
+// RAII wrapper for HIP device memory.
+struct HipDeviceBuffer {
+  void* ptr = nullptr;
+  ~HipDeviceBuffer() {
+    if (ptr) (void)hipFree(ptr);
+  }
+  HipDeviceBuffer() = default;
+  HipDeviceBuffer(const HipDeviceBuffer&) = delete;
+  HipDeviceBuffer& operator=(const HipDeviceBuffer&) = delete;
+  HipDeviceBuffer(HipDeviceBuffer&& o) noexcept : ptr(o.ptr) { o.ptr = nullptr; }
+  HipDeviceBuffer& operator=(HipDeviceBuffer&& o) noexcept {
+    if (ptr) (void)hipFree(ptr);
+    ptr = o.ptr;
+    o.ptr = nullptr;
+    return *this;
+  }
+};
+
+// Dequantize int4-packed weights from MatMulNBits format to float.
+//
+// MatMulNBits packs weights as:
+//   B:           [N, k_blocks, blob_size]  (uint8, each byte = 2 int4 values)
+//   scales:      [N, k_blocks]             (float or float16)
+//   zero_points: [N, k_blocks_zp_bytes]    (uint8, packed int4) or absent
+//
+// Output: dequantized weights in [K, N] layout (column-major w.r.t. the
+// logical [N, K] weight matrix), ready for Y = A[M,K] @ W[K,N].
+//
+// Each int4 value v is dequantized as: (v - zero_point) * scale
+// Default zero_point when absent: 8 (midpoint for unsigned 4-bit).
+static Status DequantizeInt4ToFloat(
+    const uint8_t* b_data,       // [N, k_blocks, blob_size]
+    const float* scales_data,    // [N, k_blocks] as float
+    const uint8_t* zp_data,      // [N, zp_bytes_per_row] packed uint8, or nullptr
+    int64_t K, int64_t N, int64_t block_size,
+    std::vector<float>& out) {   // [K, N] output
+  int64_t k_blocks = (K + block_size - 1) / block_size;
+  int64_t blob_size = block_size / 2;
+  out.resize(K * N);
+
+  for (int64_t n = 0; n < N; ++n) {
+    for (int64_t block = 0; block < k_blocks; ++block) {
+      float scale = scales_data[n * k_blocks + block];
+
+      // Extract zero point for this block.
+      int zp = 8;  // default for unsigned 4-bit
+      if (zp_data) {
+        int64_t zp_idx = n * k_blocks + block;
+        int64_t zp_byte = zp_idx / 2;
+        zp = (zp_idx % 2 == 0) ? (zp_data[zp_byte] & 0x0F)
+                                : ((zp_data[zp_byte] >> 4) & 0x0F);
+      }
+
+      for (int64_t i = 0; i < block_size; ++i) {
+        int64_t k = block * block_size + i;
+        if (k >= K) break;
+
+        int64_t byte_idx = i / 2;
+        uint8_t packed = b_data[n * k_blocks * blob_size + block * blob_size + byte_idx];
+        int val = (i % 2 == 0) ? (packed & 0x0F) : ((packed >> 4) & 0x0F);
+
+        // Output in [K, N] layout for direct matmul (no transpose needed).
+        out[k * N + n] = static_cast<float>(val - zp) * scale;
+      }
+    }
+  }
+
+  return Status::Success();
+}
+
+// Dequantize int4-packed weights from MatMulNBits format to float16.
+// Same layout semantics as DequantizeInt4ToFloat but with fp16 scales.
+static Status DequantizeInt4ToFloat16(
+    const uint8_t* b_data,
+    const uint16_t* scales_data,   // fp16 stored as uint16
+    const uint8_t* zp_data,
+    int64_t K, int64_t N, int64_t block_size,
+    std::vector<uint16_t>& out) {  // [K, N] output as fp16 bits
+  int64_t k_blocks = (K + block_size - 1) / block_size;
+  int64_t blob_size = block_size / 2;
+
+  // Dequantize via float intermediates, then convert to fp16.
+  // This is a build-time operation (once per model load), so the float
+  // round-trip is acceptable.
+  std::vector<float> scales_f32(N * k_blocks);
+  for (int64_t i = 0; i < N * k_blocks; ++i) {
+    // Convert fp16 bits to float via hardware/fallback.
+    uint16_t bits = scales_data[i];
+    // Manual fp16 -> fp32 conversion.
+    uint32_t sign = (bits & 0x8000u) << 16;
+    uint32_t exp = (bits >> 10) & 0x1F;
+    uint32_t mant = bits & 0x03FF;
+    uint32_t f32_bits;
+    if (exp == 0) {
+      if (mant == 0) {
+        f32_bits = sign;
+      } else {
+        // Denormalized fp16 -> normalized fp32.
+        exp = 1;
+        while ((mant & 0x0400) == 0) {
+          mant <<= 1;
+          exp--;
+        }
+        mant &= 0x03FF;
+        f32_bits = sign | ((127 - 15 + exp) << 23) | (mant << 13);
+      }
+    } else if (exp == 0x1F) {
+      f32_bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+      f32_bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+    float fval;
+    std::memcpy(&fval, &f32_bits, sizeof(float));
+    scales_f32[i] = fval;
+  }
+
+  std::vector<float> out_f32;
+  auto status = DequantizeInt4ToFloat(b_data, scales_f32.data(), zp_data,
+                                       K, N, block_size, out_f32);
+  if (status.failed()) return status;
+
+  // Convert float output to fp16.
+  out.resize(K * N);
+  for (int64_t i = 0; i < K * N; ++i) {
+    float f = out_f32[i];
+    uint32_t f32_bits;
+    std::memcpy(&f32_bits, &f, sizeof(float));
+    uint16_t sign16 = (f32_bits >> 16) & 0x8000u;
+    int32_t exp32 = ((f32_bits >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant32 = f32_bits & 0x007FFFFFu;
+    uint16_t fp16;
+    if (exp32 <= 0) {
+      fp16 = sign16;  // underflow to zero (or denorm, simplified)
+    } else if (exp32 >= 0x1F) {
+      fp16 = sign16 | 0x7C00u;  // overflow to inf
+    } else {
+      fp16 = sign16 | (static_cast<uint16_t>(exp32) << 10) |
+             static_cast<uint16_t>(mant32 >> 13);
+    }
+    out[i] = fp16;
+  }
+
+  return Status::Success();
+}
+
+// Add MatMulNBits operation to hipDNN graph.
+//
+// MatMulNBits: Y = A @ dequantize(B)^T
+//
+// We dequantize B at build time (B, scales, zero_points are all constant
+// initializers).  The dequantized weights are stored in GPU memory and
+// provided via the variant pack at execute time.
+//
+// Parameters:
+//   node          - The MatMulNBits ORT node
+//   input_attrs   - [A_attr] (only A is a runtime input; B/scales/zp are
+//                   consumed here and their TensorAttrs are not used)
+//   output_attr   - The output tensor attribute (Y)
+//   next_uid      - UID counter
+//   node_inputs   - The raw ORT node inputs for reading initializer data
+//   pre_allocs    - Output: pre-allocated device buffers for dequantized weights
+//   pre_alloc_uids - Output: UIDs corresponding to pre_allocs
+static Status AddMatMulNBitsNode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    TensorAttrPtr& output_attr,
+    int64_t& next_uid,
+    const std::vector<Ort::ConstValueInfo>& node_inputs,
+    std::vector<HipDeviceBuffer>& pre_allocs,
+    std::vector<std::pair<int64_t, void*>>& pre_alloc_uids) {
+  using namespace hipdnn_frontend::graph;
+
+  if (input_attrs.empty()) {
+    return Status::Failure("MatMulNBits requires at least 1 input tensor attribute (A)");
+  }
+
+  // A is the runtime input (activation).
+  auto a_attr = input_attrs[0];
+  if (IsScalarAttr(a_attr)) {
+    return Status::Failure("MatMulNBits input A must be a tensor, not a scalar");
+  }
+
+  // Extract attributes.
+  int64_t K = GetIntAttrOrDefault(node, "K", 0);
+  int64_t N = GetIntAttrOrDefault(node, "N", 0);
+  int64_t block_size = GetIntAttrOrDefault(node, "block_size", 0);
+
+  if (K == 0 || N == 0 || block_size == 0) {
+    return Status::Failure("MatMulNBits missing required attributes K, N, or block_size");
+  }
+
+  // Read B initializer data.
+  if (node_inputs.size() < 3) {
+    return Status::Failure("MatMulNBits requires at least 3 inputs");
+  }
+
+  Ort::ConstValue b_init{nullptr};
+  {
+    Ort::Status s = node_inputs[1].GetInitializer(b_init);
+    if (!s.IsOK() || b_init == nullptr) {
+      return Status::Failure("MatMulNBits: B must be a constant initializer");
+    }
+  }
+  const uint8_t* b_data = b_init.GetTensorData<uint8_t>();
+
+  // Read scales initializer.
+  Ort::ConstValue scales_init{nullptr};
+  {
+    Ort::Status s = node_inputs[2].GetInitializer(scales_init);
+    if (!s.IsOK() || scales_init == nullptr) {
+      return Status::Failure("MatMulNBits: scales must be a constant initializer");
+    }
+  }
+
+  // Read optional zero_points initializer.
+  const uint8_t* zp_data = nullptr;
+  Ort::ConstValue zp_init{nullptr};
+  if (node_inputs.size() >= 4) {
+    Ort::Status s = node_inputs[3].GetInitializer(zp_init);
+    if (s.IsOK() && zp_init != nullptr) {
+      zp_data = zp_init.GetTensorData<uint8_t>();
+    }
+  }
+
+  // Determine A's data type to decide dequantization precision.
+  auto a_dtype = a_attr->get_data_type();
+  bool is_fp16 = (a_dtype == hipdnn_frontend::DataType::HALF);
+
+  // Dequantize to [K, N] and allocate on GPU.
+  HipDeviceBuffer deq_buf;
+  size_t deq_bytes;
+
+  if (is_fp16) {
+    const uint16_t* scales_fp16 = scales_init.GetTensorData<uint16_t>();
+    std::vector<uint16_t> deq_host;
+    auto status = DequantizeInt4ToFloat16(b_data, scales_fp16, zp_data,
+                                          K, N, block_size, deq_host);
+    if (status.failed()) return status;
+
+    deq_bytes = deq_host.size() * sizeof(uint16_t);
+    hipError_t err = hipMalloc(&deq_buf.ptr, deq_bytes);
+    if (err != hipSuccess) {
+      return Status::Failure("hipMalloc failed for dequantized weights");
+    }
+    err = hipMemcpy(deq_buf.ptr, deq_host.data(), deq_bytes, hipMemcpyHostToDevice);
+    if (err != hipSuccess) {
+      return Status::Failure("hipMemcpy failed for dequantized weights");
+    }
+  } else {
+    const float* scales_fp32 = scales_init.GetTensorData<float>();
+    std::vector<float> deq_host;
+    auto status = DequantizeInt4ToFloat(b_data, scales_fp32, zp_data,
+                                        K, N, block_size, deq_host);
+    if (status.failed()) return status;
+
+    deq_bytes = deq_host.size() * sizeof(float);
+    hipError_t err = hipMalloc(&deq_buf.ptr, deq_bytes);
+    if (err != hipSuccess) {
+      return Status::Failure("hipMalloc failed for dequantized weights");
+    }
+    err = hipMemcpy(deq_buf.ptr, deq_host.data(), deq_bytes, hipMemcpyHostToDevice);
+    if (err != hipSuccess) {
+      return Status::Failure("hipMemcpy failed for dequantized weights");
+    }
+  }
+
+  // Create TensorAttributes for the dequantized weight [K, N].
+  auto w_attr = std::make_shared<TensorAttributes>();
+  int64_t w_uid = next_uid++;
+  std::vector<int64_t> w_shape = {K, N};
+  w_attr->set_uid(w_uid)
+      .set_name("dequantized_B")
+      .set_data_type(a_dtype)
+      .set_dim(w_shape)
+      .set_stride(ComputeStrides(w_shape))
+      .set_is_virtual(false);
+
+  // Track the pre-allocated buffer and its UID.
+  pre_alloc_uids.push_back({w_uid, deq_buf.ptr});
+  pre_allocs.push_back(std::move(deq_buf));
+
+  // Standard matmul: Y = A[M,K] @ W[K,N]
+  auto compute_dtype = GetComputeDataType(a_dtype, a_dtype);
+  if (!compute_dtype.has_value()) {
+    return Status::Failure("Unsupported data type for MatMulNBits compute");
+  }
+
+  MatmulAttributes matmul_attrs;
+  matmul_attrs.set_compute_data_type(compute_dtype.value());
+  output_attr = graph.matmul(a_attr, w_attr, matmul_attrs);
+
+  return Status::Success();
+}
+
 // Returns true if the ONNX op type is handled by the Fusilli engine.
 // When all ops in a graph are Fusilli-compatible we request that engine;
 // otherwise we let hipDNN pick the best available engine per-op.
@@ -785,12 +1084,19 @@ static Status AddSdpaNode(
 
 // Dispatch to appropriate Add*Node based on op_type.
 // Takes input tensor attributes, returns output tensor attributes.
+//
+// For ops that require reading initializer data (e.g. MatMulNBits), the raw
+// ORT node inputs, pre-allocated device buffers, and UID mappings are passed
+// through.
 Status AddNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
     const std::vector<TensorAttrPtr>& input_attrs,
     std::vector<TensorAttrPtr>& output_attrs,
-    int64_t& next_uid) {
+    int64_t& next_uid,
+    const std::vector<Ort::ConstValueInfo>& node_inputs,
+    std::vector<HipDeviceBuffer>& pre_allocs,
+    std::vector<std::pair<int64_t, void*>>& pre_alloc_uids) {
   std::string op_type = node.GetOperatorType();
 
   if (op_type == "Conv") {
@@ -805,6 +1111,16 @@ Status AddNode(
     TensorAttrPtr y_attr;
     auto status = AddMatMulNode(
         graph, node, input_attrs, y_attr, next_uid);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (op_type == "MatMulNBits") {
+    TensorAttrPtr y_attr;
+    auto status = AddMatMulNBitsNode(
+        graph, node, input_attrs, y_attr, next_uid,
+        node_inputs, pre_allocs, pre_alloc_uids);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -1254,6 +1570,12 @@ struct HipDNNGraphImpl {
   // Set during Build(); Compile() uses it to decide whether to request
   // the FUSILLI_ENGINE or let hipDNN choose per-op.
   bool all_fusilli_compatible_{true};
+
+  // Pre-allocated device buffers for dequantized weights (MatMulNBits).
+  // Ownership: buffers are freed on destruction.
+  std::vector<HipDeviceBuffer> pre_alloc_buffers_;
+  // Maps UID -> device pointer for pre-allocated constants.
+  std::vector<std::pair<int64_t, void*>> pre_alloc_uid_ptrs_;
 };
 
 Status HipDNNGraphImpl::Build(
@@ -1287,17 +1609,42 @@ Status HipDNNGraphImpl::Build(
     }
   }
 
+  // Collect the names of inputs that are consumed directly by ops like
+  // MatMulNBits (initializer-only inputs such as B, scales, zero_points).
+  // These inputs are not added to the symbol table or the hipDNN graph —
+  // the op handler reads their data and manages GPU memory itself.
+  std::unordered_set<std::string> consumed_initializer_names;
+  for (const auto& node : nodes) {
+    if (std::string(node.GetOperatorType()) == "MatMulNBits") {
+      auto ni = node.GetInputs();
+      // Inputs 1+ (B, scales, zero_points, ...) are consumed internally.
+      for (size_t i = 1; i < ni.size(); ++i) {
+        consumed_initializer_names.insert(ni[i].GetName());
+      }
+    }
+  }
+
   // Create TensorAttributes for all graph inputs and add to symbol table.
   // Scalar constant initializers (element count == 1) are embedded directly
   // into the graph via the pass-by-value API instead of becoming runtime
   // inputs.  This avoids requiring the caller to provide a device pointer
   // for values that are known at graph-build time.
+  //
+  // Inputs consumed by ops like MatMulNBits are skipped — they are handled
+  // entirely within the op's AddNode implementation.
   input_uids_.reserve(graph_inputs.size());
   for (const auto& input : graph_inputs) {
+    std::string name = input.GetName();
+
+    if (consumed_initializer_names.count(name)) {
+      input_uids_.push_back(kEmbeddedScalar);
+      continue;
+    }
+
     if (auto attr = TryExtractScalarConstant(input)) {
       // Embed the scalar directly via pass-by-value — no runtime input needed.
-      attr->set_uid(next_uid_++).set_name(input.GetName());
-      symbol_table_[input.GetName()] = attr;
+      attr->set_uid(next_uid_++).set_name(name);
+      symbol_table_[name] = attr;
       input_uids_.push_back(kEmbeddedScalar);
       continue;
     }
@@ -1306,24 +1653,33 @@ Status HipDNNGraphImpl::Build(
     auto status = CreateTensorAttr(input, next_uid_++, attr);
     if (status.failed()) return status;
     attr->set_is_virtual(false);
-    symbol_table_[input.GetName()] = attr;
+    symbol_table_[name] = attr;
     input_uids_.push_back(attr->get_uid());
   }
 
   // Process each node in the graph
   for (const auto& node : nodes) {
+    std::string op_type = node.GetOperatorType();
+
     // Track whether all ops are Fusilli-compatible.
-    if (!IsFusilliCompatibleOp(node.GetOperatorType())) {
+    if (!IsFusilliCompatibleOp(op_type)) {
       all_fusilli_compatible_ = false;
     }
 
-    // Look up input TensorAttributes from symbol table
+    // Look up input TensorAttributes from symbol table.
+    // For MatMulNBits, only the first input (A) is a runtime tensor; the
+    // remaining inputs (B, scales, zero_points) are constant initializers
+    // consumed directly by AddMatMulNBitsNode and may not be in the symbol
+    // table (their types are not supported by CreateTensorAttr).
     std::vector<Ort::ConstValueInfo> node_inputs = node.GetInputs();
     std::vector<TensorAttrPtr> input_attrs;
-    input_attrs.reserve(node_inputs.size());
 
-    for (const auto& input : node_inputs) {
-      std::string name = input.GetName();
+    bool is_matmulnbits = (op_type == "MatMulNBits");
+    size_t num_symbol_inputs = is_matmulnbits ? 1 : node_inputs.size();
+    input_attrs.reserve(num_symbol_inputs);
+
+    for (size_t idx = 0; idx < num_symbol_inputs; ++idx) {
+      std::string name = node_inputs[idx].GetName();
       auto it = symbol_table_.find(name);
       if (it == symbol_table_.end()) {
         return Status::Failure("Input not found in symbol table: " + name);
@@ -1334,7 +1690,8 @@ Status HipDNNGraphImpl::Build(
     // Add the node to hipDNN graph
     std::vector<TensorAttrPtr> output_attrs;
     auto status =
-        AddNode(*graph_, node, input_attrs, output_attrs, next_uid_);
+        AddNode(*graph_, node, input_attrs, output_attrs, next_uid_,
+                node_inputs, pre_alloc_buffers_, pre_alloc_uid_ptrs_);
     if (status.failed()) return status;
 
     // Set UID, name on output TensorAttributes and add to symbol table
@@ -1578,6 +1935,11 @@ Status HipDNNGraphImpl::Execute(OrtKernelContext* kernel_ctx) {
       if (input_uids_[i] == kEmbeddedScalar) continue;
       Ort::ConstValue input = context.GetInput(i);
       variant_pack[input_uids_[i]] = const_cast<void*>(input.GetTensorRawData());
+    }
+
+    // Map pre-allocated constant tensors (e.g., dequantized weights).
+    for (const auto& [uid, ptr] : pre_alloc_uid_ptrs_) {
+      variant_pack[uid] = ptr;
     }
 
     // Allocate outputs and map to their UIDs
