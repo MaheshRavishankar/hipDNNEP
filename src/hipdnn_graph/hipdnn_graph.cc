@@ -724,8 +724,10 @@ static Status DequantizeInt4ToFloat16(
       // Denormalized fp16: shift mantissa right to encode the exponent
       // in the mantissa field.  Values too small for even denorm become zero.
       if (exp32 >= -10) {
+        // The implicit bit (bit 23) plus mantissa, shifted right so that the
+        // result occupies the fp16 mantissa field (bits 9:0).
         uint32_t shifted = (mant32 | 0x00800000u) >> (14 - exp32);
-        fp16 = sign16 | static_cast<uint16_t>(shifted >> 13);
+        fp16 = sign16 | static_cast<uint16_t>(shifted & 0x03FFu);
       } else {
         fp16 = sign16;  // too small for fp16 denorm, flush to zero
       }
