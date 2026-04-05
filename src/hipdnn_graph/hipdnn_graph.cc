@@ -668,7 +668,6 @@ static Status DequantizeInt4ToFloat16(
     int64_t K, int64_t N, int64_t block_size,
     std::vector<uint16_t>& out) {  // [K, N] output as fp16 bits
   int64_t k_blocks = (K + block_size - 1) / block_size;
-  int64_t blob_size = block_size / 2;
 
   // Dequantize via float intermediates, then convert to fp16.
   // This is a build-time operation (once per model load), so the float
