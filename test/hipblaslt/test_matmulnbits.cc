@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <numeric>
 #include <vector>
@@ -24,6 +25,10 @@
 
 #ifndef MATMULNBITS_LARGE_TEST_MODEL_PATH
 #define MATMULNBITS_LARGE_TEST_MODEL_PATH "./matmulnbits_large_test.onnx"
+#endif
+
+#ifndef MATMULNBITS_FP16_TEST_MODEL_PATH
+#define MATMULNBITS_FP16_TEST_MODEL_PATH "./matmulnbits_fp16_test.onnx"
 #endif
 
 class HipDNNMatMulNBitsTest : public ::testing::Test {
@@ -130,6 +135,52 @@ class HipDNNMatMulNBitsTest : public ::testing::Test {
     return std::vector<float>(output_data, output_data + output_size);
   }
 
+  // Run fp16 model with HipDNN EP (smoke test — CPU EP may not support fp16
+  // MatMulNBits, so we just verify the GPU path runs without error).
+  void RunFp16WithHipDNNEp(const char* model_path,
+                           const std::vector<uint16_t>& a_data,
+                           const std::vector<int64_t>& a_shape) {
+    const OrtEpDevice* device = GetHipDNNDevice();
+    EXPECT_NE(device, nullptr) << "No HipDNN device found";
+
+    Ort::SessionOptions session_options;
+    OrtStatus* status = Ort::GetApi().SessionOptionsAppendExecutionProvider_V2(
+        session_options, *env_, &device, 1, nullptr, nullptr, 0);
+
+    if (status != nullptr) {
+      std::string error_msg = Ort::GetApi().GetErrorMessage(status);
+      Ort::GetApi().ReleaseStatus(status);
+      EXPECT_TRUE(false) << "Failed to add HipDNN EP: " << error_msg;
+      return;
+    }
+
+    Ort::Session session(*env_, model_path, session_options);
+
+    auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+
+    // Create fp16 tensor (stored as uint16_t but typed as FLOAT16).
+    std::vector<int64_t> shape_vec(a_shape);
+    OrtValue* raw_tensor = nullptr;
+    Ort::ThrowOnError(Ort::GetApi().CreateTensorWithDataAsOrtValue(
+        memory_info, const_cast<uint16_t*>(a_data.data()),
+        a_data.size() * sizeof(uint16_t),
+        shape_vec.data(), shape_vec.size(),
+        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16, &raw_tensor));
+    Ort::Value a_tensor(raw_tensor);
+
+    const char* input_name = "A";
+    const char* output_name = "Y";
+
+    auto output_tensors =
+        session.Run(Ort::RunOptions{}, &input_name, &a_tensor, 1, &output_name, 1);
+
+    // Verify output exists and has expected element count.
+    auto& output_tensor = output_tensors[0];
+    auto output_info = output_tensor.GetTensorTypeAndShapeInfo();
+    EXPECT_GT(output_info.GetElementCount(), 0u);
+    EXPECT_EQ(output_info.GetElementType(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
+  }
+
   void CompareOutputs(const std::vector<float>& cpu_output,
                       const std::vector<float>& gpu_output,
                       float tolerance = 1e-2f) {
@@ -171,6 +222,38 @@ TEST_F(HipDNNMatMulNBitsTest, BasicMatMulNBits) {
 
   // Use wider tolerance for quantized ops due to dequantization differences.
   CompareOutputs(cpu_output, gpu_output, 0.1f);
+}
+
+TEST_F(HipDNNMatMulNBitsTest, MatMulNBitsFp16) {
+  ASSERT_TRUE(ep_available_) << "HipDNN EP not available";
+  ASSERT_TRUE(IsModelAvailable(MATMULNBITS_FP16_TEST_MODEL_PATH))
+      << "MatMulNBits fp16 test model not available at: " << MATMULNBITS_FP16_TEST_MODEL_PATH;
+
+  // Model: A[8, 64] (fp16) @ dequant(B) = Y[8, 32] (fp16)
+  const int64_t m = 8, k = 64;
+
+  // Generate fp16 input data (stored as uint16_t bit patterns).
+  std::vector<uint16_t> a_data(m * k);
+  for (size_t i = 0; i < a_data.size(); ++i) {
+    // Convert float to fp16 bits: values in [0, 0.9].
+    float fval = static_cast<float>(i % 10) / 10.0f;
+    uint32_t f32;
+    std::memcpy(&f32, &fval, sizeof(float));
+    uint16_t sign = (f32 >> 16) & 0x8000u;
+    int32_t exp = ((f32 >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = f32 & 0x007FFFFFu;
+    if (exp <= 0) {
+      a_data[i] = sign;
+    } else if (exp >= 0x1F) {
+      a_data[i] = sign | 0x7C00u;
+    } else {
+      a_data[i] = sign | (static_cast<uint16_t>(exp) << 10) |
+                  static_cast<uint16_t>(mant >> 13);
+    }
+  }
+
+  std::cout << "Running MatMulNBits (fp16) with HipDNN EP..." << std::endl;
+  RunFp16WithHipDNNEp(MATMULNBITS_FP16_TEST_MODEL_PATH, a_data, {m, k});
 }
 
 TEST_F(HipDNNMatMulNBitsTest, MatMulNBitsNoZeroPoints) {

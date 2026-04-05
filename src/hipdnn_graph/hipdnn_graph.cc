@@ -584,6 +584,29 @@ struct HipDeviceBuffer {
   }
 };
 
+// Context for building a single node in the hipDNN graph.
+// Bundles shared state (graph, UID counter) with op-specific data
+// (raw ORT inputs, pre-allocated device buffers) so that AddNode
+// and op handlers have a clean, extensible interface.
+struct NodeBuildContext {
+  hipdnn_frontend::graph::Graph& graph;
+  int64_t& next_uid;
+  const std::vector<Ort::ConstValueInfo>& node_inputs;
+  std::vector<HipDeviceBuffer>& pre_allocs;
+  std::vector<std::pair<int64_t, void*>>& pre_alloc_uids;
+};
+
+// Return the input indices that an op consumes directly from initializer data
+// (bypassing the symbol table).  Empty for most ops.
+static std::vector<size_t> GetConsumedInitializerInputIndices(
+    const std::string& op_type) {
+  if (op_type == "MatMulNBits") {
+    // Inputs 1+ (B, scales, zero_points) are consumed at build time.
+    return {1, 2, 3};
+  }
+  return {};
+}
+
 // Dequantize int4-packed weights from MatMulNBits format to float.
 //
 // MatMulNBits packs weights as:
@@ -664,6 +687,7 @@ static Status DequantizeInt4ToFloat16(
         f32_bits = sign;
       } else {
         // Denormalized fp16 -> normalized fp32.
+        // The outer `mant == 0` guard ensures this loop terminates.
         exp = 1;
         while ((mant & 0x0400) == 0) {
           mant <<= 1;
@@ -698,7 +722,14 @@ static Status DequantizeInt4ToFloat16(
     uint32_t mant32 = f32_bits & 0x007FFFFFu;
     uint16_t fp16;
     if (exp32 <= 0) {
-      fp16 = sign16;  // underflow to zero (or denorm, simplified)
+      // Denormalized fp16: shift mantissa right to encode the exponent
+      // in the mantissa field.  Values too small for even denorm become zero.
+      if (exp32 >= -10) {
+        uint32_t shifted = (mant32 | 0x00800000u) >> (14 - exp32);
+        fp16 = sign16 | static_cast<uint16_t>(shifted >> 13);
+      } else {
+        fp16 = sign16;  // too small for fp16 denorm, flush to zero
+      }
     } else if (exp32 >= 0x1F) {
       fp16 = sign16 | 0x7C00u;  // overflow to inf
     } else {
@@ -719,25 +750,19 @@ static Status DequantizeInt4ToFloat16(
 // initializers).  The dequantized weights are stored in GPU memory and
 // provided via the variant pack at execute time.
 //
-// Parameters:
-//   node          - The MatMulNBits ORT node
-//   input_attrs   - [A_attr] (only A is a runtime input; B/scales/zp are
-//                   consumed here and their TensorAttrs are not used)
-//   output_attr   - The output tensor attribute (Y)
-//   next_uid      - UID counter
-//   node_inputs   - The raw ORT node inputs for reading initializer data
-//   pre_allocs    - Output: pre-allocated device buffers for dequantized weights
-//   pre_alloc_uids - Output: UIDs corresponding to pre_allocs
+// Precondition: the correct HIP device context must be active when this
+// function is called, since it allocates GPU memory via hipMalloc.
 static Status AddMatMulNBitsNode(
-    hipdnn_frontend::graph::Graph& graph,
+    NodeBuildContext& ctx,
     Ort::ConstNode node,
     const std::vector<TensorAttrPtr>& input_attrs,
-    TensorAttrPtr& output_attr,
-    int64_t& next_uid,
-    const std::vector<Ort::ConstValueInfo>& node_inputs,
-    std::vector<HipDeviceBuffer>& pre_allocs,
-    std::vector<std::pair<int64_t, void*>>& pre_alloc_uids) {
+    TensorAttrPtr& output_attr) {
   using namespace hipdnn_frontend::graph;
+  auto& graph = ctx.graph;
+  auto& next_uid = ctx.next_uid;
+  auto& node_inputs = ctx.node_inputs;
+  auto& pre_allocs = ctx.pre_allocs;
+  auto& pre_alloc_uids = ctx.pre_alloc_uids;
 
   if (input_attrs.empty()) {
     return Status::Failure("MatMulNBits requires at least 1 input tensor attribute (A)");
@@ -869,6 +894,8 @@ static Status AddMatMulNBitsNode(
 // revisit when re-enabled.
 // Note: MultiHeadAttention (SDPA) is intentionally absent — it uses
 // hipDNN's dedicated SDPA engine, not Fusilli.
+// Note: MatMulNBits is NOT Fusilli-compatible — it uses hipDNN's
+// block_scale_dequantize fused with matmul, not Fusilli.
 bool IsFusilliCompatibleOp(const std::string& op_type) {
   return op_type == "Conv" || op_type == "MatMul" || op_type == "Gemm" ||
          op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
@@ -1084,24 +1111,16 @@ static Status AddSdpaNode(
 
 // Dispatch to appropriate Add*Node based on op_type.
 // Takes input tensor attributes, returns output tensor attributes.
-//
-// For ops that require reading initializer data (e.g. MatMulNBits), the raw
-// ORT node inputs, pre-allocated device buffers, and UID mappings are passed
-// through.
 Status AddNode(
-    hipdnn_frontend::graph::Graph& graph,
+    NodeBuildContext& ctx,
     Ort::ConstNode node,
     const std::vector<TensorAttrPtr>& input_attrs,
-    std::vector<TensorAttrPtr>& output_attrs,
-    int64_t& next_uid,
-    const std::vector<Ort::ConstValueInfo>& node_inputs,
-    std::vector<HipDeviceBuffer>& pre_allocs,
-    std::vector<std::pair<int64_t, void*>>& pre_alloc_uids) {
+    std::vector<TensorAttrPtr>& output_attrs) {
   std::string op_type = node.GetOperatorType();
 
   if (op_type == "Conv") {
     TensorAttrPtr y_attr;
-    auto status = AddConvNode(graph, node, input_attrs, y_attr, next_uid);
+    auto status = AddConvNode(ctx.graph, node, input_attrs, y_attr, ctx.next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -1110,7 +1129,7 @@ Status AddNode(
   if (op_type == "MatMul" || op_type == "Gemm") {
     TensorAttrPtr y_attr;
     auto status = AddMatMulNode(
-        graph, node, input_attrs, y_attr, next_uid);
+        ctx.graph, node, input_attrs, y_attr, ctx.next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -1118,9 +1137,7 @@ Status AddNode(
 
   if (op_type == "MatMulNBits") {
     TensorAttrPtr y_attr;
-    auto status = AddMatMulNBitsNode(
-        graph, node, input_attrs, y_attr, next_uid,
-        node_inputs, pre_allocs, pre_alloc_uids);
+    auto status = AddMatMulNBitsNode(ctx, node, input_attrs, y_attr);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -1128,7 +1145,7 @@ Status AddNode(
 
   if (GetPointwiseMode(op_type).has_value()) {
     TensorAttrPtr y_attr;
-    auto status = AddPointwiseNode(graph, node, input_attrs, y_attr);
+    auto status = AddPointwiseNode(ctx.graph, node, input_attrs, y_attr);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -1136,7 +1153,7 @@ Status AddNode(
 
   if (GetUnaryPointwiseMode(op_type).has_value()) {
     TensorAttrPtr y_attr;
-    auto status = AddUnaryPointwiseNode(graph, node, input_attrs, y_attr);
+    auto status = AddUnaryPointwiseNode(ctx.graph, node, input_attrs, y_attr);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -1615,10 +1632,11 @@ Status HipDNNGraphImpl::Build(
   // the op handler reads their data and manages GPU memory itself.
   std::unordered_set<std::string> consumed_initializer_names;
   for (const auto& node : nodes) {
-    if (std::string(node.GetOperatorType()) == "MatMulNBits") {
-      auto ni = node.GetInputs();
-      // Inputs 1+ (B, scales, zero_points, ...) are consumed internally.
-      for (size_t i = 1; i < ni.size(); ++i) {
+    auto indices = GetConsumedInitializerInputIndices(node.GetOperatorType());
+    if (indices.empty()) continue;
+    auto ni = node.GetInputs();
+    for (size_t i : indices) {
+      if (i < ni.size()) {
         consumed_initializer_names.insert(ni[i].GetName());
       }
     }
@@ -1667,18 +1685,16 @@ Status HipDNNGraphImpl::Build(
     }
 
     // Look up input TensorAttributes from symbol table.
-    // For MatMulNBits, only the first input (A) is a runtime tensor; the
-    // remaining inputs (B, scales, zero_points) are constant initializers
-    // consumed directly by AddMatMulNBitsNode and may not be in the symbol
-    // table (their types are not supported by CreateTensorAttr).
+    // Inputs consumed directly by op handlers (e.g. MatMulNBits B/scales/zp)
+    // are skipped — they may not be in the symbol table.
     std::vector<Ort::ConstValueInfo> node_inputs = node.GetInputs();
     std::vector<TensorAttrPtr> input_attrs;
 
-    bool is_matmulnbits = (op_type == "MatMulNBits");
-    size_t num_symbol_inputs = is_matmulnbits ? 1 : node_inputs.size();
-    input_attrs.reserve(num_symbol_inputs);
-
-    for (size_t idx = 0; idx < num_symbol_inputs; ++idx) {
+    auto consumed_indices = GetConsumedInitializerInputIndices(op_type);
+    std::unordered_set<size_t> consumed_set(consumed_indices.begin(),
+                                            consumed_indices.end());
+    for (size_t idx = 0; idx < node_inputs.size(); ++idx) {
+      if (consumed_set.count(idx)) continue;
       std::string name = node_inputs[idx].GetName();
       auto it = symbol_table_.find(name);
       if (it == symbol_table_.end()) {
@@ -1688,10 +1704,10 @@ Status HipDNNGraphImpl::Build(
     }
 
     // Add the node to hipDNN graph
+    NodeBuildContext ctx{*graph_, next_uid_, node_inputs,
+                        pre_alloc_buffers_, pre_alloc_uid_ptrs_};
     std::vector<TensorAttrPtr> output_attrs;
-    auto status =
-        AddNode(*graph_, node, input_attrs, output_attrs, next_uid_,
-                node_inputs, pre_alloc_buffers_, pre_alloc_uid_ptrs_);
+    auto status = AddNode(ctx, node, input_attrs, output_attrs);
     if (status.failed()) return status;
 
     // Set UID, name on output TensorAttributes and add to symbol table

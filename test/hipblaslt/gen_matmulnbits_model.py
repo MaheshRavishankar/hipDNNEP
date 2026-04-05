@@ -213,6 +213,60 @@ def create_matmulnbits_no_zp_model(
     return model, deq_weights
 
 
+def create_matmulnbits_fp16_model(
+    m: int, k: int, n: int, block_size: int = 32
+) -> onnx.ModelProto:
+    """Create a MatMulNBits model with fp16 A, scales, and Y.
+
+    Uses the same quantized B weights, but with fp16 scales and fp16 I/O.
+    """
+    np.random.seed(42)
+    weights_f32 = np.random.randn(n, k).astype(np.float32) * 0.1
+
+    b_packed, scales_f32, zp_packed = quantize_to_int4(weights_f32, block_size)
+
+    # Convert scales to fp16.
+    scales_fp16 = scales_f32.astype(np.float16)
+
+    k_blocks = (k + block_size - 1) // block_size
+
+    a_input = helper.make_tensor_value_info("A", TensorProto.FLOAT16, [m, k])
+    y_output = helper.make_tensor_value_info("Y", TensorProto.FLOAT16, [m, n])
+
+    b_init = numpy_helper.from_array(b_packed, name="B")
+    scales_init = numpy_helper.from_array(scales_fp16, name="scales")
+    zp_init = numpy_helper.from_array(zp_packed, name="zero_points")
+
+    matmulnbits_node = helper.make_node(
+        "MatMulNBits",
+        inputs=["A", "B", "scales", "zero_points"],
+        outputs=["Y"],
+        domain="com.microsoft",
+        K=k,
+        N=n,
+        bits=4,
+        block_size=block_size,
+    )
+
+    graph = helper.make_graph(
+        [matmulnbits_node],
+        "matmulnbits_fp16_test",
+        [a_input],
+        [y_output],
+        [b_init, scales_init, zp_init],
+    )
+
+    model = helper.make_model(
+        graph,
+        opset_imports=[
+            helper.make_opsetid("", 21),
+            helper.make_opsetid("com.microsoft", 1),
+        ],
+    )
+    model.ir_version = 9
+    return model
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate ONNX MatMulNBits test models")
     parser.add_argument("--output-dir", default=".", help="Output directory for models")
@@ -232,6 +286,11 @@ def main():
     print("Generating matmulnbits_large_test.onnx...")
     model, _ = create_matmulnbits_model(m=16, k=128, n=64, block_size=32)
     onnx.save(model, f"{args.output_dir}/matmulnbits_large_test.onnx")
+
+    # fp16 variant
+    print("Generating matmulnbits_fp16_test.onnx...")
+    model = create_matmulnbits_fp16_model(m=8, k=64, n=32, block_size=32)
+    onnx.save(model, f"{args.output_dir}/matmulnbits_fp16_test.onnx")
 
     print("Done!")
 

@@ -646,6 +646,12 @@ static bool IsSupportedMatMulNBits(Ort::ConstNode node) {
       return false;
     }
 
+    // block_size must be even for int4 packing (2 values per byte).
+    // The ONNX spec requires power-of-2 >= 16, but validate defensively.
+    if (block_size % 2 != 0) {
+      return false;
+    }
+
     // A must have static shape and be 2D
     auto a_shape = GetTensorShape(inputs[0]);
     if (!a_shape.has_value() || a_shape->size() != 2) {

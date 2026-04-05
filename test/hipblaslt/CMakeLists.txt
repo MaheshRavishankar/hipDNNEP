@@ -40,6 +40,7 @@ target_compile_definitions(hipdnn_ep_tests PRIVATE
   MATMULNBITS_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_test.onnx"
   MATMULNBITS_NO_ZP_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_no_zp_test.onnx"
   MATMULNBITS_LARGE_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_large_test.onnx"
+  MATMULNBITS_FP16_TEST_MODEL_PATH="${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_fp16_test.onnx"
 )
 
 # Generate MatMulNBits test models
@@ -47,6 +48,7 @@ set(MATMULNBITS_TEST_MODELS
   ${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_test.onnx
   ${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_no_zp_test.onnx
   ${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_large_test.onnx
+  ${CMAKE_CURRENT_BINARY_DIR}/matmulnbits_fp16_test.onnx
 )
 
 add_custom_command(
