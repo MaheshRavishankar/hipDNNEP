@@ -1,9 +1,5 @@
 # Claude Code Instructions for hipDNN EP
 
-Note: Codex is now the primary repo-local automation path. The Codex source of
-truth is `AGENTS.md`, with reusable Codex skills under `plugins/hipdnnep-codex/`.
-This file remains for Claude compatibility.
-
 ## Project Overview
 
 This is an out-of-tree ONNXRuntime Execution Provider (EP) that uses AMD's hipDNN library for accelerated inference on AMD GPUs. The EP is built as a plugin that can be dynamically loaded by ONNXRuntime.
