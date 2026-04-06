@@ -1143,7 +1143,7 @@ Status AddNode(
 
   if (op_type == "MultiHeadAttention" || op_type == "GroupQueryAttention") {
     TensorAttrPtr y_attr;
-    auto status = AddSdpaNode(graph, node, input_attrs, y_attr, next_uid);
+    auto status = AddSdpaNode(ctx.graph, node, input_attrs, y_attr, ctx.next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
