@@ -403,8 +403,10 @@ static bool IsSupportedGroupQueryAttention(Ort::ConstNode node) {
       return false;
     }
 
-    // Only single output (no present_key/present_value).
-    if (outputs.size() != 1) {
+    // Must have at least the main output.  The ORT CPU kernel also
+    // produces present_key/present_value (outputs 1-2) which hipDNN
+    // does not need — we only consume output 0.
+    if (outputs.size() < 1) {
       return false;
     }
 
@@ -482,19 +484,24 @@ static bool IsSupportedGroupQueryAttention(Ort::ConstNode node) {
       return false;
     }
 
-    // Reject unsupported optional inputs.
+    // Check for unsupported optional inputs.  Empty-string inputs in the
+    // ONNX node definition result in null ConstValueInfo entries — test
+    // with operator bool() before accessing.
     auto is_present = [&](size_t idx) {
       if (idx >= inputs.size()) return false;
+      if (!inputs[idx]) return false;
       return GetTensorElementType(inputs[idx]) !=
              ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
     };
 
-    // Reject past_key (3), past_value (4), seqlens_k (5),
-    // total_sequence_length (6), cos_cache (7), sin_cache (8).
-    for (size_t i = 3; i < inputs.size(); ++i) {
-      if (is_present(i)) {
-        return false;
-      }
+    // Reject past_key (3), past_value (4), cos_cache (7), sin_cache (8).
+    // seqlens_k (5) and total_sequence_length (6) are required metadata
+    // that the ORT CPU kernel needs; we allow them.
+    if (is_present(3) || is_present(4)) {
+      return false;  // past KV not supported
+    }
+    if (is_present(7) || is_present(8)) {
+      return false;  // rotary embedding not supported
     }
 
     return true;

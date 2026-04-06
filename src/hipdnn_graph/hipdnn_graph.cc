@@ -760,9 +760,11 @@ static Status AddSdpaNode(
         1.0f / std::sqrt(static_cast<float>(head_size));
   }
 
-  // Causal masking: unidirectional=1 means causal.
+  // Causal masking: for MHA, unidirectional=1 means causal.
+  // GQA is always causal (ORT sets is_unidirectional=true unconditionally).
+  std::string sdpa_op_type = node.GetOperatorType();
   int64_t unidirectional = GetIntAttrOrDefault(node, "unidirectional", 0);
-  if (unidirectional != 0) {
+  if (unidirectional != 0 || sdpa_op_type == "GroupQueryAttention") {
     sdpa_attrs.causal_mask = true;
   }
 
@@ -1292,12 +1294,22 @@ Status HipDNNGraphImpl::Build(
   // into the graph via the pass-by-value API instead of becoming runtime
   // inputs.  This avoids requiring the caller to provide a device pointer
   // for values that are known at graph-build time.
+  //
+  // Graph inputs with unsupported data types (e.g. int32 metadata like
+  // seqlens_k in GQA) are skipped — they are not processed by hipDNN.
   input_uids_.reserve(graph_inputs.size());
   for (const auto& input : graph_inputs) {
     if (auto attr = TryExtractScalarConstant(input)) {
       // Embed the scalar directly via pass-by-value — no runtime input needed.
       attr->set_uid(next_uid_++).set_name(input.GetName());
       symbol_table_[input.GetName()] = attr;
+      input_uids_.push_back(kEmbeddedScalar);
+      continue;
+    }
+
+    auto dtype = ToHipDNNDataType(GetTensorElementType(input));
+    if (!dtype.has_value()) {
+      // Non-float metadata input (e.g. int32 seqlens_k in GQA) — skip.
       input_uids_.push_back(kEmbeddedScalar);
       continue;
     }
@@ -1317,15 +1329,29 @@ Status HipDNNGraphImpl::Build(
       all_fusilli_compatible_ = false;
     }
 
-    // Look up input TensorAttributes from symbol table
+    // Look up input TensorAttributes from symbol table.
+    // For SDPA ops (MHA/GQA), skip inputs not in the symbol table — these
+    // are integer metadata (seqlens_k, total_sequence_length) that ORT's
+    // CPU kernel uses for validation but hipDNN does not process.
     std::vector<Ort::ConstValueInfo> node_inputs = node.GetInputs();
     std::vector<TensorAttrPtr> input_attrs;
     input_attrs.reserve(node_inputs.size());
 
+    std::string op_type = node.GetOperatorType();
+    bool is_sdpa = (op_type == "MultiHeadAttention" ||
+                    op_type == "GroupQueryAttention");
+
     for (const auto& input : node_inputs) {
+      // Empty-string optional inputs (e.g. past_key in GQA) appear as
+      // null entries — skip them.
+      if (!input) continue;
       std::string name = input.GetName();
       auto it = symbol_table_.find(name);
       if (it == symbol_table_.end()) {
+        // SDPA ops (MHA/GQA) reference cross-attention inputs that may not
+        // be in the symbol table when the subgraph only covers self-attention.
+        // Skip missing inputs rather than failing.
+        if (is_sdpa) continue;
         return Status::Failure("Input not found in symbol table: " + name);
       }
       input_attrs.push_back(it->second);
@@ -1337,12 +1363,15 @@ Status HipDNNGraphImpl::Build(
         AddNode(*graph_, node, input_attrs, output_attrs, next_uid_);
     if (status.failed()) return status;
 
-    // Set UID, name on output TensorAttributes and add to symbol table
+    // Set UID, name on output TensorAttributes and add to symbol table.
+    // For SDPA ops, hipDNN produces only the main output while the ORT
+    // node may also declare present_key/present_value — only process
+    // the outputs that AddNode actually returned.
     std::vector<Ort::ConstValueInfo> node_outputs = node.GetOutputs();
-    if (output_attrs.size() != node_outputs.size()) {
+    if (output_attrs.size() > node_outputs.size()) {
       return Status::Failure("Output count mismatch for node " + node.GetName() +
-                             ": expected " + std::to_string(node_outputs.size()) +
-                             ", got " + std::to_string(output_attrs.size()));
+                             ": node defines " + std::to_string(node_outputs.size()) +
+                             " but got " + std::to_string(output_attrs.size()));
     }
 
     for (size_t i = 0; i < output_attrs.size(); ++i) {
