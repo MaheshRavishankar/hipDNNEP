@@ -125,9 +125,19 @@ Rate each issue 0-100:
 
 **Only report issues with confidence >= 75.**
 
+## Hard Rules
+
+These are non-negotiable. Flag violations as **critical** (confidence 100):
+
+- **Never disable or skip tests.** There are no "pre-existing failures."
+  If a test fails, the code is wrong — fix the code, not the test config.
+  Marking tests as `UNSUPPORTED`, `XFAIL`, `DISABLED_`, or skipping them
+  in CMake is never acceptable as a fix for a code issue.
+- **Never assume failures are pre-existing.** If tests fail after your
+  change, your change broke them. Investigate and fix.
+
 ## False Positives to Avoid
 
-- Pre-existing issues not introduced by this change
 - Issues a compiler, linter, or clang-format would catch
 - Style preferences not in CLAUDE.md
 - Intentional changes related to the PR's purpose

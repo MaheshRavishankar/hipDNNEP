@@ -236,7 +236,15 @@ Run tests on both paths in the worktree. Both must pass. Use absolute paths
    br update <bead-id> --add-label "ready-for-review"
    ```
 
-2. **Push the branch:**
+2. **Run pre-commit checks** before pushing. Fix any issues and amend/commit:
+   ```bash
+   cd /home/mahesh/onnxruntime/hipDNNEP-<bead-id> && pre-commit run --all-files
+   ```
+   This runs trailing-whitespace, end-of-file-fixer, check-yaml,
+   check-added-large-files, and clang-format. If any check fails, fix the
+   files, stage, and commit the fix. Do NOT push until all checks pass.
+
+3. **Push the branch:**
    ```bash
    git -C /home/mahesh/onnxruntime/hipDNNEP-<bead-id> push -u origin users/<author>/<bead-id>-<slug>
    ```
@@ -341,13 +349,19 @@ feedback arrives). The worktree and branch from Phase 1 must still exist.
 
 6. **Re-run tests** (Phase 4) — both non-MLIR and MLIR must pass.
 
-7. **Push and update.** Push the new commits and update the bead:
+7. **Run pre-commit checks** before pushing:
+   ```bash
+   cd /home/mahesh/onnxruntime/hipDNNEP-<bead-id> && pre-commit run --all-files
+   ```
+   Fix any failures, stage, and commit before pushing.
+
+8. **Push and update.** Push the new commits and update the bead:
    ```bash
    git -C /home/mahesh/onnxruntime/hipDNNEP-<bead-id> push
    br comments add <bead-id> "Addressed PR feedback: <summary of changes>. Tests pass (MLIR: X/X, non-MLIR: Y/Y)."
    ```
 
-8. **Reply on the PR.** For each comment, post an appropriate reply:
+9. **Reply on the PR.** For each comment, post an appropriate reply:
 
    **For comments addressed with a code change:**
    ```bash
@@ -364,7 +378,7 @@ feedback arrives). The worktree and branch from Phase 1 must still exist.
    Every comment must get a reply — either a "Fixed in" reference or a
    substantive answer. Do not leave comments without a response.
 
-9. **Update the PR description** to reflect the current state of the PR
+10. **Update the PR description** to reflect the current state of the PR
    after addressing feedback. Read the full diff (`gh pr diff <number>`)
    and rewrite the PR body to accurately describe what the PR does NOW,
    not what it did at initial creation. Use `gh pr edit` with a HEREDOC:
@@ -388,7 +402,7 @@ feedback arrives). The worktree and branch from Phase 1 must still exist.
    )"
    ```
 
-10. **Stop and report** what was changed and that tests pass. Wait for
+11. **Stop and report** what was changed and that tests pass. Wait for
     further feedback or approval.
 
 ## Phase 6: Land (after human approval)

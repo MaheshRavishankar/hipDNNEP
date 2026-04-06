@@ -68,7 +68,7 @@ TORCH_MLIR_INSTALL="/home/mahesh/onnxruntime/build/torch-mlir/install"
 VENV="${MAIN_CHECKOUT}/.venv"
 
 # SDK paths — fall back to defaults if env vars are unset.
-THEROCK="${THEROCK_DIST:-/home/mahesh/TheRock/build/dist/rocm}"
+THEROCK="${THEROCK_DIST:-/home/mahesh/TheRock/build/MaheshRelWithDebInfo/dist/rocm}"
 ORT_ROOT="${ONNXRUNTIME_ROOT:-/home/mahesh/onnxruntime/onnxruntime}"
 
 # Claude location (via nvm).
@@ -93,10 +93,13 @@ fi
 
 EXTRA_BINDS=()
 
-# Worktree (read-write, if it already exists — Phase 1 may create it).
-if [[ -d "$WORKTREE" ]]; then
-  EXTRA_BINDS+=(--bind "$WORKTREE" "$WORKTREE")
-fi
+# Worktree (read-write). Pre-create the directory so that git worktree add
+# inside the sandbox writes to the real filesystem, not a tmpfs overlay.
+mkdir -p "$WORKTREE"
+EXTRA_BINDS+=(--bind "$WORKTREE" "$WORKTREE")
+
+# Ensure .git/worktrees exists (created on first `git worktree add`).
+mkdir -p "$MAIN_CHECKOUT/.git/worktrees"
 
 # Build directory (read-write, create if needed).
 mkdir -p "$BUILD_BASE"
@@ -108,8 +111,17 @@ if [[ -d "$TORCH_MLIR_INSTALL" ]]; then
 fi
 
 # THEROCK SDK (read-only, if it exists).
+# Mount the full build tree (parent of dist/rocm) so CMake can find
+# third-party deps like nlohmann-json via relative paths.
 if [[ -d "$THEROCK" ]]; then
-  EXTRA_BINDS+=(--ro-bind "$THEROCK" "$THEROCK")
+  THEROCK_BUILD_ROOT="$(cd "$THEROCK/../.." && pwd)"
+  EXTRA_BINDS+=(--ro-bind "$THEROCK_BUILD_ROOT" "$THEROCK_BUILD_ROOT")
+fi
+
+# TheRock source tree (read-only) — agents read hipDNN frontend headers.
+THEROCK_SRC="/home/mahesh/TheRock/TheRock"
+if [[ -d "$THEROCK_SRC" ]]; then
+  EXTRA_BINDS+=(--ro-bind "$THEROCK_SRC" "$THEROCK_SRC")
 fi
 
 # ONNXRuntime (read-only, if it exists).
@@ -175,7 +187,7 @@ exec /usr/bin/bwrap \
   `# --- Main checkout: read-only with surgical read-write overlays ---` \
   --ro-bind "$MAIN_CHECKOUT" "$MAIN_CHECKOUT" \
   --bind "$MAIN_CHECKOUT/.beads" "$MAIN_CHECKOUT/.beads" \
-  --bind "$MAIN_CHECKOUT/.git/worktrees" "$MAIN_CHECKOUT/.git/worktrees" \
+  --bind "$MAIN_CHECKOUT/.git" "$MAIN_CHECKOUT/.git" \
   \
   `# --- Conditional mounts (worktree, build, SDKs) ---` \
   "${EXTRA_BINDS[@]}" \

@@ -20,7 +20,7 @@ An out-of-tree Execution Provider for ONNXRuntime that uses AMD's hipDNN library
 
 | Dependency | Commit |
 |------------|--------|
-| [TheRock](https://github.com/ROCm/TheRock) | [`af5cb3a1`](https://github.com/ROCm/TheRock/commit/af5cb3a1c89a0c5b13394b16cb55d9ccafcdce22) |
+| [TheRock](https://github.com/ROCm/TheRock) | [`669c98bf`](https://github.com/ROCm/TheRock/commit/669c98bf9325c0a06006140310187da0a2f7d192) |
 
 ## Prerequisites
 
