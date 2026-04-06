@@ -22,8 +22,9 @@ config.substitutions.append(("%hipdnn-onnx-to-torch-mlir", config.hipdnn_onnx_to
 config.substitutions.append(("%S", config.test_source_root))
 config.substitutions.append(("%B", config.test_exec_root))
 
-# Environment
+# Environment — put venv python first so lit's `python3` finds onnx etc.
 config.environment["PATH"] = os.pathsep.join([
+    os.path.dirname(config.python_executable),
     os.path.dirname(config.hipdnn_onnx_to_torch_mlir),
     os.path.dirname(config.hipdnn_ep_opt),
     config.environment.get("PATH", "")
