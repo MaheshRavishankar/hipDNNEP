@@ -64,12 +64,24 @@ ctest --preset RelWithDebInfo
 For the experimental IR-based compilation pipeline:
 
 ```bash
-# First build torch-mlir (one-time setup, see CLAUDE.md for details)
+# First build torch-mlir (one-time setup, see AGENTS.md for details)
 # Then:
 cmake --preset RelWithDebInfo-MLIR
 cmake --build --preset RelWithDebInfo-MLIR
 ctest --preset RelWithDebInfo-MLIR
 ```
+
+## Codex Workflow
+
+This repo now includes a Codex-native instruction file at `AGENTS.md` and a
+repo-local Codex plugin at `plugins/hipdnnep-codex/`.
+
+- Primary repo instructions: `AGENTS.md`
+- Codex sandbox launcher: `scripts/hipdnn-codex-sandbox.sh`
+- Repo-local plugin marketplace: `.agents/plugins/marketplace.json`
+
+The existing Claude workflow under `.claude/` and
+`scripts/hipdnn-sandbox.sh` remains intact.
 
 ## Usage
 

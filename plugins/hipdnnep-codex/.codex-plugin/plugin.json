@@ -1,0 +1,25 @@
+{
+  "name": "hipdnnep-codex",
+  "version": "0.1.0",
+  "description": "Repo-local Codex workflows for hipDNNEP development.",
+  "author": {
+    "name": "Mahesh Ravishankar"
+  },
+  "license": "MIT",
+  "keywords": ["onnxruntime", "hipdnn", "codex", "beads", "review"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "hipDNNEP Codex",
+    "shortDescription": "Codex workflows for hipDNNEP task execution.",
+    "longDescription": "Implements repo-local Codex skills for bead execution, PM sweeps, and code review in hipDNNEP.",
+    "developerName": "Mahesh Ravishankar",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write", "Shell"],
+    "defaultPrompt": [
+      "Implement the next ready bead in hipDNNEP.",
+      "Review my hipDNNEP diff for correctness risks.",
+      "Sweep beads and PRs and report what needs action."
+    ],
+    "brandColor": "#C2410C"
+  }
+}
