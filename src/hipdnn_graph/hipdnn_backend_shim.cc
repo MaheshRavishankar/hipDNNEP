@@ -26,6 +26,10 @@
 namespace {
 
 std::once_flag g_init_flag;
+
+// The library handle is intentionally never dlclose'd.  Each shim function
+// caches its dlsym result in a function-local static, so closing the handle
+// would leave dangling pointers.  The handle is effectively process-lifetime.
 void* g_lib = nullptr;
 
 void initLibrary() {
@@ -64,9 +68,11 @@ FnPtr resolve(const char* name) {
   static auto fn = resolve<type>(#name); \
   if (!fn) return;
 
-#define RESOLVE_PTR(name, type) \
+// For functions returning const char* — return a descriptive string instead
+// of nullptr so callers that pass the result to printf/fprintf don't crash.
+#define RESOLVE_STR(name, type) \
   static auto fn = resolve<type>(#name); \
-  if (!fn) return nullptr;
+  if (!fn) return "(hipdnn_backend not loaded)";
 
 }  // namespace
 
@@ -162,7 +168,7 @@ hipdnnStatus_t hipdnnBackendSetAttribute(
 
 const char* hipdnnGetErrorString(hipdnnStatus_t status) {
   using Fn = const char* (*)(hipdnnStatus_t);
-  RESOLVE_PTR(hipdnnGetErrorString, Fn);
+  RESOLVE_STR(hipdnnGetErrorString, Fn);
   return fn(status);
 }
 
@@ -282,7 +288,7 @@ hipdnnStatus_t hipdnnGetVersion_ext(const char** version) {
 
 const char* hipdnnVersionString_ext() {
   using Fn = const char* (*)();
-  RESOLVE_PTR(hipdnnVersionString_ext, Fn);
+  RESOLVE_STR(hipdnnVersionString_ext, Fn);
   return fn();
 }
 
