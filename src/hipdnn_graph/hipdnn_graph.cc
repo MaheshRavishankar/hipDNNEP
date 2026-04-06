@@ -787,17 +787,25 @@ static Status AddSdpaNode(
 // Add SimplifiedLayerNormalization (RMS Norm) to hipDNN graph.
 // Inputs: X, Scale.  Outputs: Y (and optionally inv_std_var).
 //
-// hipDNN's RMSNorm always normalizes over axis 1 (channel) and expects
-// Scale with shape [1, C, 1, 1].  ONNX's SimplifiedLayerNormalization
-// normalizes over dimensions [axis:rank] with Scale shape matching those
-// dims.  To bridge this gap, we reshape:
-//   X: [d0, d1, ..., d_{axis-1}, d_axis, ..., d_{rank-1}]
-//     -> [1, C, N, 1]  where N = product(d0..d_{axis-1}), C = product(d_axis..d_{rank-1})
-//   Scale: [d_axis, ..., d_{rank-1}]
-//     -> [1, C, 1, 1]
-//   Y output: [1, C, N, 1] (caller's Build loop sets final shape from ORT graph)
-// The batch dimensions are placed in the spatial (H) position so that
-// hipDNN normalizes over C for each independent batch position.
+// hipDNN's RMSNorm normalizes over axis 1 (C) of a 4D [N,C,H,W] tensor
+// and expects Scale with shape [1, C, 1, 1].  The engine requires N=1;
+// it does not support batched normalization over dim 0.
+//
+// ONNX's SimplifiedLayerNormalization normalizes over [axis:rank], so we
+// collapse dims into a 4D view that satisfies hipDNN's constraints:
+//
+//   Let  norm_size = product(d_axis … d_{rank-1})   (dims to normalize)
+//        batch     = product(d_0 … d_{axis-1})      (remaining dims)
+//
+//   X:     [d0, …, d_{axis-1}, d_axis, …, d_{rank-1}]
+//       -> [1, norm_size, batch, 1]          (NCHW with N=1, C=norm_size, H=batch)
+//   Scale: [d_axis, …, d_{rank-1}]
+//       -> [1, norm_size, 1, 1]
+//   Y:     [1, norm_size, batch, 1]
+//
+// Because N must be 1, the batch dimension lives in H.  hipDNN normalizes
+// over C independently for each (H,W) position, so each batch element
+// gets its own normalization — which is exactly the ONNX semantics.
 static Status AddRMSNormNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
@@ -833,25 +841,24 @@ static Status AddRMSNormNode(
     axis += rank;
   }
 
-  // Compute the batch (N) and channel (C) sizes for hipDNN's view.
-  int64_t batch_size = 1;
+  // Collapse into two products: norm_size (dims to normalize) and batch.
+  int64_t batch = 1;
   for (int64_t i = 0; i < axis; ++i) {
-    batch_size *= x_dims[i];
+    batch *= x_dims[i];
   }
-  int64_t channel_size = 1;
+  int64_t norm_size = 1;
   for (int64_t i = axis; i < rank; ++i) {
-    channel_size *= x_dims[i];
+    norm_size *= x_dims[i];
   }
 
-  // Reshape X to [1, C, N, 1] for hipDNN RMSNorm (normalizes over axis 1).
-  // Batch dims go into the spatial (H) position so hipDNN normalizes over C
-  // independently for each batch element.
-  x_attr->set_dim({1, channel_size, batch_size, 1});
-  x_attr->set_stride(ComputeStrides({1, channel_size, batch_size, 1}));
+  // Reshape X to [1, norm_size, batch, 1].  See function comment for why
+  // batch is in the H position (hipDNN requires N=1 for RMSNorm).
+  x_attr->set_dim({1, norm_size, batch, 1});
+  x_attr->set_stride(ComputeStrides({1, norm_size, batch, 1}));
 
-  // Reshape Scale to [1, C, 1, 1] (per-channel scaling).
-  scale_attr->set_dim({1, channel_size, 1, 1});
-  scale_attr->set_stride(ComputeStrides({1, channel_size, 1, 1}));
+  // Reshape Scale to [1, norm_size, 1, 1] (per-channel scaling).
+  scale_attr->set_dim({1, norm_size, 1, 1});
+  scale_attr->set_stride(ComputeStrides({1, norm_size, 1, 1}));
 
   // Extract epsilon attribute (default 1e-5 per ONNX spec).
   float epsilon = GetFloatAttrOrDefault(node, "epsilon", 1e-5f);
@@ -869,12 +876,12 @@ static Status AddRMSNormNode(
   // invRms is nullptr in INFERENCE mode.
   auto [y_attr, inv_rms_attr] = graph.rmsnorm(x_attr, scale_attr, rmsnorm_attrs);
 
-  // Set Y shape to [1, C, N, 1] matching the reshaped X so hipDNN graph
-  // validation passes.  The caller's Build loop preserves this (dim is
-  // non-empty), but Execute uses output_shapes_ (the original ORT shape)
-  // for output tensor allocation, so the reshape is transparent to ORT.
-  y_attr->set_dim({1, channel_size, batch_size, 1});
-  y_attr->set_stride(ComputeStrides({1, channel_size, batch_size, 1}));
+  // Set Y shape to [1, norm_size, batch, 1] matching the reshaped X so
+  // hipDNN graph validation passes.  Execute uses output_shapes_ (the
+  // original ORT shape) for output tensor allocation, so the reshape is
+  // transparent to ORT.
+  y_attr->set_dim({1, norm_size, batch, 1});
+  y_attr->set_stride(ComputeStrides({1, norm_size, batch, 1}));
   output_attrs.push_back(y_attr);
 
   if (need_inv_std_var) {
