@@ -594,9 +594,10 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
 
 // Check if a MatMulNBits (com.microsoft) node is supported by this EP.
 // MatMulNBits performs Y = A @ dequantize(B) where A is fp16/fp32 and B is
-// int4-quantized weights packed as uint8.  We support the case where B, scales,
-// and zero_points are constant initializers so that we can dequantize the
-// weights at graph build time.
+// int4-quantized weights packed as uint8.  We keep the weights in int4 on the
+// GPU and use hipDNN's block_scale_dequantize fused with matmul for execution.
+// B, scales, and zero_points must be constant initializers.  Only symmetric
+// quantization (zero_point = 8, the default) is supported.
 static bool IsSupportedMatMulNBits(Ort::ConstNode node) {
   try {
     std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
@@ -658,7 +659,7 @@ static bool IsSupportedMatMulNBits(Ort::ConstNode node) {
       return false;
     }
 
-    // B, scales must be constant initializers (we dequantize at build time)
+    // B, scales must be constant initializers (repacked at build time)
     if (!inputs[1].IsConstantInitializer()) {
       return false;
     }

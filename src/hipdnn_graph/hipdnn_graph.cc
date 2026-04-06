@@ -607,51 +607,69 @@ static std::vector<size_t> GetConsumedInitializerInputIndices(
   return {};
 }
 
-// Dequantize int4-packed weights from MatMulNBits format to float.
+// Repack int4 weights from MatMulNBits [N, k_blocks, blob_size] layout to
+// a contiguous [K, N] packed int4 layout suitable for hipDNN's INT4 type.
 //
-// MatMulNBits packs weights as:
-//   B:           [N, k_blocks, blob_size]  (uint8, each byte = 2 int4 values)
-//   scales:      [N, k_blocks]             (float or float16)
-//   zero_points: [N, k_blocks_zp_bytes]    (uint8, packed int4) or absent
+// MatMulNBits stores unsigned int4 values (0-15) with a default zero_point
+// of 8.  hipDNN's INT4 is signed two's complement (-8 to 7).  When
+// zero_point == 8, subtracting it converts unsigned to signed, which is
+// equivalent to XORing each nibble with 0x8.
 //
-// Output: dequantized weights in [K, N] layout (column-major w.r.t. the
-// logical [N, K] weight matrix), ready for Y = A[M,K] @ W[K,N].
+// This function only supports the symmetric case (zero_point absent or all 8).
+// Non-default zero points are rejected.
 //
-// Each int4 value v is dequantized as: (v - zero_point) * scale
-// Default zero_point when absent: 8 (midpoint for unsigned 4-bit).
-static Status DequantizeInt4ToFloat(
-    const uint8_t* b_data,       // [N, k_blocks, blob_size]
-    const float* scales_data,    // [N, k_blocks] as float
-    const uint8_t* zp_data,      // [N, zp_bytes_per_row] packed uint8, or nullptr
+// The output is packed as 2 int4 values per byte (low nibble first), in
+// row-major [K, N] order: linear index = k * N + n.
+static Status RepackInt4ToKN(
+    const uint8_t* b_data,   // [N, k_blocks, blob_size]
+    const uint8_t* zp_data,  // packed uint4, or nullptr
     int64_t K, int64_t N, int64_t block_size,
-    std::vector<float>& out) {   // [K, N] output
+    std::vector<uint8_t>& out) {
   int64_t k_blocks = (K + block_size - 1) / block_size;
   int64_t blob_size = block_size / 2;
-  out.resize(K * N);
+
+  // Reject non-default zero points (asymmetric quantization).
+  if (zp_data) {
+    int64_t total_zp = N * k_blocks;
+    for (int64_t i = 0; i < total_zp; ++i) {
+      int64_t byte_idx = i / 2;
+      int zp = (i % 2 == 0) ? (zp_data[byte_idx] & 0x0F)
+                             : ((zp_data[byte_idx] >> 4) & 0x0F);
+      if (zp != 8) {
+        return Status::Failure(
+            "MatMulNBits: only symmetric quantization (zero_point=8) is "
+            "supported for native int4; found zero_point=" +
+            std::to_string(zp));
+      }
+    }
+  }
+
+  // Output: [K, N] packed int4 → ceil(K * N / 2) bytes.
+  int64_t total_elements = K * N;
+  out.resize((total_elements + 1) / 2, 0);
 
   for (int64_t n = 0; n < N; ++n) {
     for (int64_t block = 0; block < k_blocks; ++block) {
-      float scale = scales_data[n * k_blocks + block];
-
-      // Extract zero point for this block.
-      int zp = 8;  // default for unsigned 4-bit
-      if (zp_data) {
-        int64_t zp_idx = n * k_blocks + block;
-        int64_t zp_byte = zp_idx / 2;
-        zp = (zp_idx % 2 == 0) ? (zp_data[zp_byte] & 0x0F)
-                                : ((zp_data[zp_byte] >> 4) & 0x0F);
-      }
-
       for (int64_t i = 0; i < block_size; ++i) {
         int64_t k = block * block_size + i;
         if (k >= K) break;
 
-        int64_t byte_idx = i / 2;
-        uint8_t packed = b_data[n * k_blocks * blob_size + block * blob_size + byte_idx];
+        // Read unsigned int4 value from source.
+        int64_t src_byte = n * k_blocks * blob_size + block * blob_size + i / 2;
+        uint8_t packed = b_data[src_byte];
         int val = (i % 2 == 0) ? (packed & 0x0F) : ((packed >> 4) & 0x0F);
 
-        // Output in [K, N] layout for direct matmul (no transpose needed).
-        out[k * N + n] = static_cast<float>(val - zp) * scale;
+        // Convert unsigned int4 (with zp=8) to signed int4: XOR bit 3.
+        val ^= 0x8;
+
+        // Write to [K, N] packed output.
+        int64_t dst_idx = k * N + n;
+        int64_t dst_byte = dst_idx / 2;
+        if (dst_idx % 2 == 0) {
+          out[dst_byte] = (out[dst_byte] & 0xF0) | (val & 0x0F);
+        } else {
+          out[dst_byte] = (out[dst_byte] & 0x0F) | ((val & 0x0F) << 4);
+        }
       }
     }
   }
@@ -659,97 +677,34 @@ static Status DequantizeInt4ToFloat(
   return Status::Success();
 }
 
-// Dequantize int4-packed weights from MatMulNBits format to float16.
-// Same layout semantics as DequantizeInt4ToFloat but with fp16 scales.
-static Status DequantizeInt4ToFloat16(
-    const uint8_t* b_data,
-    const uint16_t* scales_data,   // fp16 stored as uint16
-    const uint8_t* zp_data,
-    int64_t K, int64_t N, int64_t block_size,
-    std::vector<uint16_t>& out) {  // [K, N] output as fp16 bits
-  int64_t k_blocks = (K + block_size - 1) / block_size;
-
-  // Dequantize via float intermediates, then convert to fp16.
-  // This is a build-time operation (once per model load), so the float
-  // round-trip is acceptable.
-  std::vector<float> scales_f32(N * k_blocks);
-  for (int64_t i = 0; i < N * k_blocks; ++i) {
-    // Convert fp16 bits to float via hardware/fallback.
-    uint16_t bits = scales_data[i];
-    // Manual fp16 -> fp32 conversion.
-    uint32_t sign = (bits & 0x8000u) << 16;
-    uint32_t exp = (bits >> 10) & 0x1F;
-    uint32_t mant = bits & 0x03FF;
-    uint32_t f32_bits;
-    if (exp == 0) {
-      if (mant == 0) {
-        f32_bits = sign;
-      } else {
-        // Denormalized fp16 -> normalized fp32.
-        // The outer `mant == 0` guard ensures this loop terminates.
-        exp = 1;
-        while ((mant & 0x0400) == 0) {
-          mant <<= 1;
-          exp--;
-        }
-        mant &= 0x03FF;
-        f32_bits = sign | ((127 - 15 + exp) << 23) | (mant << 13);
-      }
-    } else if (exp == 0x1F) {
-      f32_bits = sign | 0x7F800000u | (mant << 13);
-    } else {
-      f32_bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+// Repack scales from MatMulNBits [N, k_blocks] layout to [k_blocks, N].
+// Works for any element size (float or float16) since we copy raw bytes.
+static void TransposeScales(
+    const uint8_t* src,  // [N, k_blocks] in element_size bytes
+    int64_t N, int64_t k_blocks, size_t element_size,
+    std::vector<uint8_t>& out) {
+  out.resize(k_blocks * N * element_size);
+  for (int64_t n = 0; n < N; ++n) {
+    for (int64_t b = 0; b < k_blocks; ++b) {
+      size_t src_off = (n * k_blocks + b) * element_size;
+      size_t dst_off = (b * N + n) * element_size;
+      std::memcpy(out.data() + dst_off, src + src_off, element_size);
     }
-    float fval;
-    std::memcpy(&fval, &f32_bits, sizeof(float));
-    scales_f32[i] = fval;
   }
-
-  std::vector<float> out_f32;
-  auto status = DequantizeInt4ToFloat(b_data, scales_f32.data(), zp_data,
-                                       K, N, block_size, out_f32);
-  if (status.failed()) return status;
-
-  // Convert float output to fp16.
-  out.resize(K * N);
-  for (int64_t i = 0; i < K * N; ++i) {
-    float f = out_f32[i];
-    uint32_t f32_bits;
-    std::memcpy(&f32_bits, &f, sizeof(float));
-    uint16_t sign16 = (f32_bits >> 16) & 0x8000u;
-    int32_t exp32 = ((f32_bits >> 23) & 0xFF) - 127 + 15;
-    uint32_t mant32 = f32_bits & 0x007FFFFFu;
-    uint16_t fp16;
-    if (exp32 <= 0) {
-      // Denormalized fp16: shift mantissa right to encode the exponent
-      // in the mantissa field.  Values too small for even denorm become zero.
-      if (exp32 >= -10) {
-        // The implicit bit (bit 23) plus mantissa, shifted right so that the
-        // result occupies the fp16 mantissa field (bits 9:0).
-        uint32_t shifted = (mant32 | 0x00800000u) >> (14 - exp32);
-        fp16 = sign16 | static_cast<uint16_t>(shifted & 0x03FFu);
-      } else {
-        fp16 = sign16;  // too small for fp16 denorm, flush to zero
-      }
-    } else if (exp32 >= 0x1F) {
-      fp16 = sign16 | 0x7C00u;  // overflow to inf
-    } else {
-      fp16 = sign16 | (static_cast<uint16_t>(exp32) << 10) |
-             static_cast<uint16_t>(mant32 >> 13);
-    }
-    out[i] = fp16;
-  }
-
-  return Status::Success();
 }
 
 // Add MatMulNBits operation to hipDNN graph.
 //
 // MatMulNBits: Y = A @ dequantize(B)^T
 //
-// We dequantize B at build time (B, scales, zero_points are all constant
-// initializers).  The dequantized weights are stored in GPU memory and
-// provided via the variant pack at execute time.
+// The int4 weights stay in int4 format on the GPU.  At graph execution time,
+// hipDNN fuses block_scale_dequantize (int4 → fp16/fp32) with the matmul,
+// reading int4 data directly and saving memory bandwidth.
+//
+// Graph structure:
+//   B_int4 [K,N] (INT4)  ──┐
+//   scales [k_blocks,N]  ───┤── block_scale_dequantize ──▶ B_deq [K,N] (virtual)
+//   A [M,K]  ───────────────┤── matmul ──▶ Y [M,N]
 //
 // Precondition: the correct HIP device context must be active when this
 // function is called, since it allocates GPU memory via hipMalloc.
@@ -817,64 +772,90 @@ static Status AddMatMulNBitsNode(
     }
   }
 
-  // Determine A's data type to decide dequantization precision.
+  int64_t k_blocks = (K + block_size - 1) / block_size;
   auto a_dtype = a_attr->get_data_type();
-  bool is_fp16 = (a_dtype == hipdnn_frontend::DataType::HALF);
 
-  // Dequantize to [K, N] and allocate on GPU.
-  HipDeviceBuffer deq_buf;
-  size_t deq_bytes;
-
-  if (is_fp16) {
-    const uint16_t* scales_fp16 = scales_init.GetTensorData<uint16_t>();
-    std::vector<uint16_t> deq_host;
-    auto status = DequantizeInt4ToFloat16(b_data, scales_fp16, zp_data,
-                                          K, N, block_size, deq_host);
+  // --- Repack int4 weights to [K, N] layout (unsigned → signed int4) ---
+  std::vector<uint8_t> b_repacked;
+  {
+    auto status = RepackInt4ToKN(b_data, zp_data, K, N, block_size, b_repacked);
     if (status.failed()) return status;
-
-    deq_bytes = deq_host.size() * sizeof(uint16_t);
-    hipError_t err = hipMalloc(&deq_buf.ptr, deq_bytes);
-    if (err != hipSuccess) {
-      return Status::Failure("hipMalloc failed for dequantized weights");
-    }
-    err = hipMemcpy(deq_buf.ptr, deq_host.data(), deq_bytes, hipMemcpyHostToDevice);
-    if (err != hipSuccess) {
-      return Status::Failure("hipMemcpy failed for dequantized weights");
-    }
-  } else {
-    const float* scales_fp32 = scales_init.GetTensorData<float>();
-    std::vector<float> deq_host;
-    auto status = DequantizeInt4ToFloat(b_data, scales_fp32, zp_data,
-                                        K, N, block_size, deq_host);
-    if (status.failed()) return status;
-
-    deq_bytes = deq_host.size() * sizeof(float);
-    hipError_t err = hipMalloc(&deq_buf.ptr, deq_bytes);
-    if (err != hipSuccess) {
-      return Status::Failure("hipMalloc failed for dequantized weights");
-    }
-    err = hipMemcpy(deq_buf.ptr, deq_host.data(), deq_bytes, hipMemcpyHostToDevice);
-    if (err != hipSuccess) {
-      return Status::Failure("hipMemcpy failed for dequantized weights");
-    }
   }
 
-  // Create TensorAttributes for the dequantized weight [K, N].
-  auto w_attr = std::make_shared<TensorAttributes>();
-  int64_t w_uid = next_uid++;
-  std::vector<int64_t> w_shape = {K, N};
-  w_attr->set_uid(w_uid)
-      .set_name("dequantized_B")
-      .set_data_type(a_dtype)
-      .set_dim(w_shape)
-      .set_stride(ComputeStrides(w_shape))
+  // Upload repacked int4 weights to GPU.
+  HipDeviceBuffer b_buf;
+  {
+    hipError_t err = hipMalloc(&b_buf.ptr, b_repacked.size());
+    if (err != hipSuccess)
+      return Status::Failure("hipMalloc failed for int4 weights");
+    err = hipMemcpy(b_buf.ptr, b_repacked.data(), b_repacked.size(),
+                    hipMemcpyHostToDevice);
+    if (err != hipSuccess)
+      return Status::Failure("hipMemcpy failed for int4 weights");
+  }
+
+  // --- Repack scales from [N, k_blocks] to [k_blocks, N] ---
+  bool is_fp16 = (a_dtype == hipdnn_frontend::DataType::HALF);
+  size_t scale_elem_size = is_fp16 ? sizeof(uint16_t) : sizeof(float);
+  auto scales_dtype = is_fp16 ? hipdnn_frontend::DataType::HALF
+                              : hipdnn_frontend::DataType::FLOAT;
+
+  std::vector<uint8_t> scales_repacked;
+  TransposeScales(reinterpret_cast<const uint8_t*>(
+                      scales_init.GetTensorRawData()),
+                  N, k_blocks, scale_elem_size, scales_repacked);
+
+  // Upload repacked scales to GPU.
+  HipDeviceBuffer scales_buf;
+  {
+    hipError_t err = hipMalloc(&scales_buf.ptr, scales_repacked.size());
+    if (err != hipSuccess)
+      return Status::Failure("hipMalloc failed for scales");
+    err = hipMemcpy(scales_buf.ptr, scales_repacked.data(),
+                    scales_repacked.size(), hipMemcpyHostToDevice);
+    if (err != hipSuccess)
+      return Status::Failure("hipMemcpy failed for scales");
+  }
+
+  // --- Build hipDNN graph: block_scale_dequantize → matmul ---
+
+  // B tensor: [K, N] INT4 (non-virtual, pre-allocated on GPU).
+  auto b_attr = std::make_shared<TensorAttributes>();
+  int64_t b_uid = next_uid++;
+  std::vector<int64_t> b_shape = {K, N};
+  b_attr->set_uid(b_uid)
+      .set_name("int4_B")
+      .set_data_type(hipdnn_frontend::DataType::INT4)
+      .set_dim(b_shape)
+      .set_stride(ComputeStrides(b_shape))
       .set_is_virtual(false);
 
-  // Track the pre-allocated buffer and its UID.
-  pre_alloc_uids.push_back({w_uid, deq_buf.ptr});
-  pre_allocs.push_back(std::move(deq_buf));
+  pre_alloc_uids.push_back({b_uid, b_buf.ptr});
+  pre_allocs.push_back(std::move(b_buf));
 
-  // Standard matmul: Y = A[M,K] @ W[K,N]
+  // Scale tensor: [k_blocks, N] (non-virtual, pre-allocated on GPU).
+  auto scale_attr = std::make_shared<TensorAttributes>();
+  int64_t scale_uid = next_uid++;
+  std::vector<int64_t> scale_shape = {k_blocks, N};
+  scale_attr->set_uid(scale_uid)
+      .set_name("scales_B")
+      .set_data_type(scales_dtype)
+      .set_dim(scale_shape)
+      .set_stride(ComputeStrides(scale_shape))
+      .set_is_virtual(false);
+
+  pre_alloc_uids.push_back({scale_uid, scales_buf.ptr});
+  pre_allocs.push_back(std::move(scales_buf));
+
+  // block_scale_dequantize: int4 → fp16/fp32 (virtual output fused with matmul).
+  BlockScaleDequantizeAttributes deq_attrs;
+  deq_attrs.set_block_size(
+      std::vector<int32_t>{static_cast<int32_t>(block_size)});
+
+  auto deq_output = graph.block_scale_dequantize(b_attr, scale_attr, deq_attrs);
+  deq_output->set_data_type(a_dtype);
+
+  // matmul: Y = A[M,K] @ B_deq[K,N]
   auto compute_dtype = GetComputeDataType(a_dtype, a_dtype);
   if (!compute_dtype.has_value()) {
     return Status::Failure("Unsupported data type for MatMulNBits compute");
@@ -882,7 +863,7 @@ static Status AddMatMulNBitsNode(
 
   MatmulAttributes matmul_attrs;
   matmul_attrs.set_compute_data_type(compute_dtype.value());
-  output_attr = graph.matmul(a_attr, w_attr, matmul_attrs);
+  output_attr = graph.matmul(a_attr, deq_output, matmul_attrs);
 
   return Status::Success();
 }
