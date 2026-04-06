@@ -600,6 +600,12 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
 // quantization (zero_point = 8, the default) is supported.
 static bool IsSupportedMatMulNBits(Ort::ConstNode node) {
   try {
+    // MatMulNBits is a com.microsoft contrib op.
+    std::string domain = node.GetDomain();
+    if (domain != "com.microsoft") {
+      return false;
+    }
+
     std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
     std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
 
@@ -653,7 +659,9 @@ static bool IsSupportedMatMulNBits(Ort::ConstNode node) {
       return false;
     }
 
-    // A must have static shape and be 2D
+    // A must have static shape and be 2D.  Batched MatMulNBits (3D+ A) is
+    // not yet supported because the block_scale_dequantize + matmul graph
+    // fusion has only been validated with 2D inputs.
     auto a_shape = GetTensorShape(inputs[0]);
     if (!a_shape.has_value() || a_shape->size() != 2) {
       return false;
