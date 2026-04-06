@@ -6,8 +6,9 @@
 #
 # Restricts the agent to read-write access on a bead worktree and build
 # directory while providing read-only access to the main checkout, SDKs,
-# and system tools. Codex runs inside the sandbox, so the filesystem
-# restrictions are the effective permission model.
+# and system tools. Codex runs with
+# --dangerously-bypass-approvals-and-sandbox inside the sandbox, so the outer
+# bwrap filesystem restrictions are the effective permission model.
 #
 # SETUP (one-time, requires sudo):
 #   sudo ./setup-bwrap-apparmor.sh
@@ -172,4 +173,4 @@ exec /usr/bin/bwrap \
   --chdir "$MAIN_CHECKOUT" \
   --die-with-parent \
   -- \
-  "$CODEX_BIN" "${CODEX_ARGS[@]}"
+  "$CODEX_BIN" --dangerously-bypass-approvals-and-sandbox "${CODEX_ARGS[@]}"
