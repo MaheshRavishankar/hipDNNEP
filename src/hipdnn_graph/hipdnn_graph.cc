@@ -661,20 +661,22 @@ static Status AddUnaryPointwiseNode(
   return Status::Success();
 }
 
-// Add MultiHeadAttention (SDPA) operation to hipDNN graph.
+// Add MultiHeadAttention or GroupQueryAttention (SDPA) operation to hipDNN graph.
 //
-// ORT's MultiHeadAttention takes Q, K, V in [B, S, hidden_size] format
-// where hidden_size = num_heads * head_size.  hipDNN's graph.sdpa() expects
-// [B, H, S, D].  We reshape via stride manipulation (zero-copy) to convert
-// between the two layouts:
+// Both ops take Q, K, V in [B, S, hidden_size] format.  For MHA, all three
+// use num_heads * head_size.  For GQA, K/V use kv_num_heads * head_size
+// (fewer heads, shared across query head groups).
+//
+// hipDNN's graph.sdpa() expects [B, H, S, D] and natively supports different
+// head counts for Q vs K/V.  We reshape via stride manipulation (zero-copy):
 //
 //   [B, S, H*D] row-major strides: [S*H*D, H*D, 1]
 //   viewed as [B, H, S, D] with strides: [S*H*D, D, H*D, 1]
 //
-// The output from SDPA is [B, H, S, D] and needs to be stored in [B, S, H*D]
-// order.  We achieve this by setting the output tensor's strides to
-// [S*H*D, D, H*D, 1], which tells hipDNN to write the output in an order
-// that, when interpreted as contiguous [B, S, H*D], is correct.
+// The output from SDPA is [B, H_q, S, D] and needs to be stored in
+// [B, S, H_q*D] order.  We set the output tensor's strides to
+// [S*H_q*D, D, H_q*D, 1], which tells hipDNN to write the output in an order
+// that, when interpreted as contiguous [B, S, H_q*D], is correct.
 static Status AddSdpaNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
@@ -685,7 +687,7 @@ static Status AddSdpaNode(
 
   // We need at least Q, K, V.
   if (input_attrs.size() < 3) {
-    return Status::Failure("MultiHeadAttention requires at least 3 inputs (Q, K, V)");
+    return Status::Failure("SDPA requires at least 3 inputs (Q, K, V)");
   }
 
   // Reshape the input tensor attrs in place.  This is safe because the EP
@@ -701,35 +703,42 @@ static Status AddSdpaNode(
   // Q, K, V must be 3D tensors.
   if (q_attr->get_dim().size() != 3 || k_attr->get_dim().size() != 3 ||
       v_attr->get_dim().size() != 3) {
-    return Status::Failure("MultiHeadAttention inputs must be 3D [B, S, hidden_size]");
+    return Status::Failure("SDPA inputs must be 3D [B, S, hidden_size]");
   }
 
   int64_t num_heads = GetIntAttrOrDefault(node, "num_heads", 0);
   if (num_heads <= 0) {
-    return Status::Failure("MultiHeadAttention requires num_heads > 0");
+    return Status::Failure("SDPA requires num_heads > 0");
+  }
+
+  // For GQA, kv_num_heads may differ from num_heads.  For MHA, K/V use the
+  // same num_heads as Q (kv_num_heads attribute absent or 0).
+  int64_t kv_num_heads = GetIntAttrOrDefault(node, "kv_num_heads", 0);
+  if (kv_num_heads <= 0) {
+    kv_num_heads = num_heads;
   }
 
   auto q_dim = q_attr->get_dim();
   int64_t batch_size = q_dim[0];
   int64_t seq_len_q = q_dim[1];
-  int64_t hidden_size = q_dim[2];
-  int64_t head_size = hidden_size / num_heads;
+  int64_t q_hidden = q_dim[2];
+  int64_t head_size = q_hidden / num_heads;
 
   auto k_dim = k_attr->get_dim();
   int64_t seq_len_kv = k_dim[1];
+  int64_t kv_hidden = kv_num_heads * head_size;
 
-  // Reshape Q from [B, S, H*D] to [B, H, S, D] via stride manipulation.
-  // Row-major [B, S, H*D] has strides [S*H*D, H*D, 1].
-  // View as [B, S, H, D] has strides [S*H*D, H*D, D, 1].
-  // Transpose dims 1,2 to [B, H, S, D] has strides [S*H*D, D, H*D, 1].
+  // Reshape Q from [B, S, H_q*D] to [B, H_q, S, D] via stride manipulation.
   q_attr->set_dim({batch_size, num_heads, seq_len_q, head_size});
-  q_attr->set_stride({seq_len_q * hidden_size, head_size, hidden_size, 1});
+  q_attr->set_stride({seq_len_q * q_hidden, head_size, q_hidden, 1});
 
-  k_attr->set_dim({batch_size, num_heads, seq_len_kv, head_size});
-  k_attr->set_stride({seq_len_kv * hidden_size, head_size, hidden_size, 1});
+  // Reshape K from [B, S, H_kv*D] to [B, H_kv, S, D].
+  k_attr->set_dim({batch_size, kv_num_heads, seq_len_kv, head_size});
+  k_attr->set_stride({seq_len_kv * kv_hidden, head_size, kv_hidden, 1});
 
-  v_attr->set_dim({batch_size, num_heads, seq_len_kv, head_size});
-  v_attr->set_stride({seq_len_kv * hidden_size, head_size, hidden_size, 1});
+  // Reshape V from [B, S, H_kv*D] to [B, H_kv, S, D].
+  v_attr->set_dim({batch_size, kv_num_heads, seq_len_kv, head_size});
+  v_attr->set_stride({seq_len_kv * kv_hidden, head_size, kv_hidden, 1});
 
   // Determine compute data type.
   auto compute_dtype =
@@ -765,11 +774,10 @@ static Status AddSdpaNode(
   // Call graph.sdpa() — returns [output, stats].
   auto [o_attr, stats_attr] = graph.sdpa(q_attr, k_attr, v_attr, sdpa_attrs);
 
-  // Reshape output from [B, H, S_q, D] to [B, S_q, H*D] via strides.
-  // We set dims to [B, H, S_q, D] with strides [S_q*H*D, D, H*D, 1]
-  // so that when ORT reads it as contiguous [B, S_q, H*D], the data is correct.
+  // Reshape output from [B, H_q, S_q, D] to [B, S_q, H_q*D] via strides.
+  // Output always uses num_heads (Q heads), not kv_num_heads.
   o_attr->set_dim({batch_size, num_heads, seq_len_q, head_size});
-  o_attr->set_stride({seq_len_q * hidden_size, head_size, hidden_size, 1});
+  o_attr->set_stride({seq_len_q * q_hidden, head_size, q_hidden, 1});
 
   output_attr = o_attr;
   return Status::Success();
@@ -818,7 +826,7 @@ Status AddNode(
     return Status::Success();
   }
 
-  if (op_type == "MultiHeadAttention") {
+  if (op_type == "MultiHeadAttention" || op_type == "GroupQueryAttention") {
     TensorAttrPtr y_attr;
     auto status = AddSdpaNode(graph, node, input_attrs, y_attr, next_uid);
     if (status.failed()) return status;

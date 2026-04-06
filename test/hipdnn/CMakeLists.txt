@@ -163,3 +163,63 @@ target_compile_definitions(hipdnn_ep_tests PRIVATE
   MHA_SCALE_TEST_MODEL_PATH="${MHA_SCALE_TEST_MODEL}"
   MHA_CROSS_TEST_MODEL_PATH="${MHA_CROSS_TEST_MODEL}"
 )
+
+# hipDNN (GroupQueryAttention / GQA) test sources
+target_sources(hipdnn_ep_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_gqa.cc
+)
+
+# Generate GroupQueryAttention test models
+set(GQA_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/gqa_test.onnx")
+set(GQA_MQA_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/gqa_mqa_test.onnx")
+set(GQA_MHA_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/gqa_mha_test.onnx")
+set(GQA_CROSS_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/gqa_cross_test.onnx")
+
+add_custom_command(
+  OUTPUT ${GQA_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
+          --num-heads 8 --kv-num-heads 2 --output ${GQA_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
+  COMMENT "Generating GQA standard test model (8Q/2KV heads)"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${GQA_MQA_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
+          --num-heads 8 --kv-num-heads 1 --output ${GQA_MQA_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
+  COMMENT "Generating GQA MQA test model (8Q/1KV heads)"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${GQA_MHA_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
+          --num-heads 8 --kv-num-heads 8 --output ${GQA_MHA_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
+  COMMENT "Generating GQA MHA baseline test model (8Q/8KV heads)"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${GQA_CROSS_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
+          --num-heads 8 --kv-num-heads 2 --seq-len-kv 32
+          --output ${GQA_CROSS_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
+  COMMENT "Generating GQA cross-attention test model (8Q/2KV, S_kv=32)"
+  VERBATIM
+)
+
+add_custom_target(generate_gqa_test_models DEPENDS
+  ${GQA_TEST_MODEL} ${GQA_MQA_TEST_MODEL} ${GQA_MHA_TEST_MODEL}
+  ${GQA_CROSS_TEST_MODEL})
+add_dependencies(hipdnn_ep_tests generate_gqa_test_models)
+
+target_compile_definitions(hipdnn_ep_tests PRIVATE
+  GQA_TEST_MODEL_PATH="${GQA_TEST_MODEL}"
+  GQA_MQA_TEST_MODEL_PATH="${GQA_MQA_TEST_MODEL}"
+  GQA_MHA_TEST_MODEL_PATH="${GQA_MHA_TEST_MODEL}"
+  GQA_CROSS_TEST_MODEL_PATH="${GQA_CROSS_TEST_MODEL}"
+)

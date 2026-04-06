@@ -382,6 +382,128 @@ static bool IsSupportedMultiHeadAttention(Ort::ConstNode node) {
   }
 }
 
+// Check if a GroupQueryAttention contrib op is supported by this EP.
+// GQA is like MHA but allows different head counts for Q vs K/V:
+//   Q shape: [B, S_q, num_heads * head_size]
+//   K shape: [B, S_kv, kv_num_heads * head_size]
+//   V shape: [B, S_kv, kv_num_heads * head_size]
+// hipDNN's graph.sdpa() natively supports different head counts.
+static bool IsSupportedGroupQueryAttention(Ort::ConstNode node) {
+  try {
+    std::string domain = node.GetDomain();
+    if (domain != "com.microsoft") {
+      return false;
+    }
+
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    // GQA has up to 9 inputs; first 3 (query, key, value) are required.
+    if (inputs.size() < 3) {
+      return false;
+    }
+
+    // Only single output (no present_key/present_value).
+    if (outputs.size() != 1) {
+      return false;
+    }
+
+    // Check Q, K, V data types — must all match and be float or float16.
+    ONNXTensorElementDataType q_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType k_type = GetTensorElementType(inputs[1]);
+    ONNXTensorElementDataType v_type = GetTensorElementType(inputs[2]);
+    ONNXTensorElementDataType o_type = GetTensorElementType(outputs[0]);
+
+    bool supported_type =
+        (q_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+         q_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) &&
+        q_type == k_type && q_type == v_type && q_type == o_type;
+
+    if (!supported_type) {
+      return false;
+    }
+
+    // Q, K, V must be 3D: [batch_size, seq_len, hidden_size]
+    auto q_shape = GetTensorShape(inputs[0]);
+    auto k_shape = GetTensorShape(inputs[1]);
+    auto v_shape = GetTensorShape(inputs[2]);
+
+    if (!q_shape.has_value() || !k_shape.has_value() || !v_shape.has_value()) {
+      return false;
+    }
+
+    if (q_shape->size() != 3 || k_shape->size() != 3 || v_shape->size() != 3) {
+      return false;
+    }
+
+    // num_heads and kv_num_heads are required.
+    int64_t num_heads = GetIntAttrOrDefault(node, "num_heads", 0);
+    int64_t kv_num_heads = GetIntAttrOrDefault(node, "kv_num_heads", 0);
+    if (num_heads <= 0 || kv_num_heads <= 0) {
+      return false;
+    }
+
+    // num_heads must be divisible by kv_num_heads for even head grouping.
+    if (num_heads % kv_num_heads != 0) {
+      return false;
+    }
+
+    // Q hidden_size must be divisible by num_heads.
+    int64_t q_hidden = (*q_shape)[2];
+    if (q_hidden % num_heads != 0) {
+      return false;
+    }
+
+    // K/V hidden_size must be divisible by kv_num_heads.
+    int64_t kv_hidden = (*k_shape)[2];
+    if (kv_hidden % kv_num_heads != 0) {
+      return false;
+    }
+
+    // head_size must be consistent: Q and K/V must use the same head_size.
+    int64_t head_size = q_hidden / num_heads;
+    int64_t kv_head_size = kv_hidden / kv_num_heads;
+    if (head_size != kv_head_size) {
+      return false;
+    }
+
+    // Batch dimensions must match.
+    if ((*q_shape)[0] != (*k_shape)[0] || (*q_shape)[0] != (*v_shape)[0]) {
+      return false;
+    }
+
+    // K and V sequence lengths must match.
+    if ((*k_shape)[1] != (*v_shape)[1]) {
+      return false;
+    }
+
+    // K and V hidden sizes must match each other.
+    if ((*v_shape)[2] != kv_hidden) {
+      return false;
+    }
+
+    // Reject unsupported optional inputs.
+    auto is_present = [&](size_t idx) {
+      if (idx >= inputs.size()) return false;
+      return GetTensorElementType(inputs[idx]) !=
+             ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
+    };
+
+    // Reject past_key (3), past_value (4), seqlens_k (5),
+    // total_sequence_length (6), cos_cache (7), sin_cache (8).
+    for (size_t i = 3; i < inputs.size(); ++i) {
+      if (is_present(i)) {
+        return false;
+      }
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if a unary pointwise op (Sigmoid) is supported by this EP
 static bool IsSupportedUnaryPointwise(Ort::ConstNode node) {
   try {
@@ -504,6 +626,9 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   // Contrib ops (com.microsoft domain)
   if (op_type == "MultiHeadAttention") {
     return IsSupportedMultiHeadAttention(node);
+  }
+  if (op_type == "GroupQueryAttention") {
+    return IsSupportedGroupQueryAttention(node);
   }
 
   return false;
