@@ -1,0 +1,20 @@
+{
+  "name": "hipdnnep-local",
+  "interface": {
+    "displayName": "hipDNNEP Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "hipdnnep-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hipdnnep-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
