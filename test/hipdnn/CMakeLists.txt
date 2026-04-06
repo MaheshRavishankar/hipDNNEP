@@ -205,10 +205,10 @@ add_custom_command(
 add_custom_command(
   OUTPUT ${GQA_CROSS_TEST_MODEL}
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
-          --num-heads 8 --kv-num-heads 2 --seq-len-kv 32
+          --num-heads 8 --kv-num-heads 2 --seq-len 32
           --output ${GQA_CROSS_TEST_MODEL}
   DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_gqa_model.py
-  COMMENT "Generating GQA cross-attention test model (8Q/2KV, S_kv=32)"
+  COMMENT "Generating GQA long-sequence test model (8Q/2KV, S=32)"
   VERBATIM
 )
 

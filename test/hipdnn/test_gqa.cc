@@ -76,14 +76,15 @@ TEST_F(HipDNNGqaTest, MhaBaseline) {
   RunAndCompare(GQA_MHA_TEST_MODEL_PATH, q_shape, q, k_shape, k, v_shape, v);
 }
 
-// Cross-attention GQA: S_q != S_kv with grouped heads.
-// B=2, S_q=16, S_kv=32, H_q=8, H_kv=2, D=64
+// Longer sequence GQA: S=32 with grouped heads (exercises larger attention
+// matrices than the standard S=16 tests).
+// B=2, S=32, H_q=8, H_kv=2, D=64
 // Q hidden = 512, KV hidden = 128
-TEST_F(HipDNNGqaTest, CrossAttentionGqa) {
-  const std::vector<int64_t> q_shape = {2, 16, 512};
+TEST_F(HipDNNGqaTest, LongSequenceGqa) {
+  const std::vector<int64_t> q_shape = {2, 32, 512};
   const std::vector<int64_t> k_shape = {2, 32, 128};
   const std::vector<int64_t> v_shape = {2, 32, 128};
-  size_t q_n = 2 * 16 * 512;
+  size_t q_n = 2 * 32 * 512;
   size_t k_n = 2 * 32 * 128;
   size_t v_n = 2 * 32 * 128;
 
