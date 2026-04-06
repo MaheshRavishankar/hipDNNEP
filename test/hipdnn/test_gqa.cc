@@ -15,8 +15,8 @@
 #define GQA_MHA_TEST_MODEL_PATH "./gqa_mha_test.onnx"
 #endif
 
-#ifndef GQA_CROSS_TEST_MODEL_PATH
-#define GQA_CROSS_TEST_MODEL_PATH "./gqa_cross_test.onnx"
+#ifndef GQA_LONG_SEQ_TEST_MODEL_PATH
+#define GQA_LONG_SEQ_TEST_MODEL_PATH "./gqa_long_seq_test.onnx"
 #endif
 
 class HipDNNGqaTest : public HipDNNSdpaTestBase {};
@@ -92,6 +92,6 @@ TEST_F(HipDNNGqaTest, LongSequenceGqa) {
   auto k = GenerateTestData(k_n, 0.1f, 0.00015f);
   auto v = GenerateTestData(v_n, -0.2f, 0.0001f);
 
-  RunAndCompare(GQA_CROSS_TEST_MODEL_PATH, q_shape, q, k_shape, k,
+  RunAndCompare(GQA_LONG_SEQ_TEST_MODEL_PATH, q_shape, q, k_shape, k,
                 v_shape, v);
 }
