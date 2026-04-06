@@ -14,6 +14,7 @@
       "installDir": "${sourceDir}/../install/hipDNNEP/${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_HIP_COMPILER": "/home/mahesh/TheRock/build/MaheshRelWithDebInfo/dist/rocm/llvm/bin/clang++",
         "THEROCK_DIST": "/home/mahesh/TheRock/build/MaheshRelWithDebInfo/dist/rocm",
         "ONNXRUNTIME_ROOT": "/home/mahesh/onnxruntime/onnxruntime",
         "HIP_PLATFORM": "amd"

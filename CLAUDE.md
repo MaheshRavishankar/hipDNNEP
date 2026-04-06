@@ -141,6 +141,23 @@ When writing CHECK lines, follow these conventions:
     CHECK-SAME:   -> !torch.vtensor<[2,4],f32>
    ```
 
+## Agent Sandbox
+
+Implementer agents MUST always run inside the bwrap sandbox via
+`scripts/hipdnn-sandbox.sh`. Never use the Claude Code Agent tool to
+launch implementer agents directly — it lacks the correct filesystem
+isolation (worktrees are outside the main checkout and need read-write
+access). The sandbox script mounts the worktree read-write, the main
+checkout read-only, and provides access to SDKs and build directories.
+
+```bash
+# Launch an implementer for a bead:
+scripts/hipdnn-sandbox.sh <bead-id> -- -p "<prompt>" --max-turns 100
+```
+
+The PM skill (`/pm`) handles this automatically. See
+`.claude/agents/implementer.md` for the full agent lifecycle.
+
 ## Notes
 
 - Conv2D via hipDNN graph API
