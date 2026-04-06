@@ -11,10 +11,6 @@
 #define MHA_CAUSAL_TEST_MODEL_PATH "./mha_causal_test.onnx"
 #endif
 
-#ifndef MHA_SCALE_TEST_MODEL_PATH
-#define MHA_SCALE_TEST_MODEL_PATH "./mha_scale_test.onnx"
-#endif
-
 #ifndef MHA_CROSS_TEST_MODEL_PATH
 #define MHA_CROSS_TEST_MODEL_PATH "./mha_cross_test.onnx"
 #endif
@@ -52,23 +48,6 @@ TEST_F(HipDNNMhaTest, CausalSdpa) {
   auto v = GenerateTestData(v_n, -0.1f, 0.0001f);
 
   RunAndCompare(MHA_CAUSAL_TEST_MODEL_PATH, q_shape, q, k_shape, k,
-                v_shape, v);
-}
-
-// SDPA with custom scale override.
-TEST_F(HipDNNMhaTest, ScaledSdpa) {
-  const std::vector<int64_t> q_shape = {2, 16, 256};
-  const std::vector<int64_t> k_shape = {2, 16, 256};
-  const std::vector<int64_t> v_shape = {2, 16, 256};
-  size_t q_n = 2 * 16 * 256;
-  size_t k_n = 2 * 16 * 256;
-  size_t v_n = 2 * 16 * 256;
-
-  auto q = GenerateTestData(q_n, -0.2f, 0.0001f);
-  auto k = GenerateTestData(k_n, 0.2f, 0.0001f);
-  auto v = GenerateTestData(v_n, 0.0f, 0.0002f);
-
-  RunAndCompare(MHA_SCALE_TEST_MODEL_PATH, q_shape, q, k_shape, k,
                 v_shape, v);
 }
 

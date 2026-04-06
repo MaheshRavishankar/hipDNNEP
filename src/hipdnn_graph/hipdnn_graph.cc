@@ -751,14 +751,11 @@ static Status AddSdpaNode(
   SdpaAttributes sdpa_attrs;
   sdpa_attrs.set_compute_data_type(compute_dtype.value());
 
-  // Scale: default is 1/sqrt(head_size), can be overridden by attribute.
-  float scale = GetFloatAttrOrDefault(node, "scale", 0.0f);
-  if (scale != 0.0f) {
-    sdpa_attrs.attn_scale_value = scale;
-  } else {
-    sdpa_attrs.attn_scale_value =
-        1.0f / std::sqrt(static_cast<float>(head_size));
-  }
+  // Custom scale values are rejected at the support-check level
+  // (IsSupportedMultiHeadAttention / IsSupportedGroupQueryAttention),
+  // so we always use the default 1/sqrt(head_size) here.
+  sdpa_attrs.attn_scale_value =
+      1.0f / std::sqrt(static_cast<float>(head_size));
 
   // Causal masking: for MHA, unidirectional=1 means causal.
   // GQA is always causal (ORT sets is_unidirectional=true unconditionally).
