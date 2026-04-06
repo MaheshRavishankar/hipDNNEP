@@ -343,6 +343,14 @@ static bool IsSupportedMultiHeadAttention(Ort::ConstNode node) {
       return false;
     }
 
+    // Reject custom scale — hipDNN's Fusilli backend cannot compile SDPA
+    // with a non-default scale.  A scale of 0 means "use default
+    // 1/sqrt(head_size)" which is fine.
+    float scale = GetFloatAttrOrDefault(node, "scale", 0.0f);
+    if (scale != 0.0f) {
+      return false;
+    }
+
     // Reject unsupported optional inputs.
     // Input 3 (bias), 4 (key_padding_mask), 6+ (past_key, past_value, etc.)
     // must be absent.
@@ -481,6 +489,14 @@ static bool IsSupportedGroupQueryAttention(Ort::ConstNode node) {
 
     // K and V hidden sizes must match each other.
     if ((*v_shape)[2] != kv_hidden) {
+      return false;
+    }
+
+    // Reject custom scale — hipDNN's Fusilli backend cannot compile SDPA
+    // with a non-default scale.  A scale of 0 means "use default
+    // 1/sqrt(head_size)" which is fine.
+    float scale = GetFloatAttrOrDefault(node, "scale", 0.0f);
+    if (scale != 0.0f) {
       return false;
     }
 

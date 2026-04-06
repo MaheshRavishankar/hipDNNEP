@@ -55,7 +55,9 @@ TEST_F(HipDNNMhaTest, CausalSdpa) {
                 v_shape, v);
 }
 
-// SDPA with custom scale override.
+// SDPA with custom scale override.  hipDNN rejects nodes with non-default
+// scale, so ORT falls back to CPU.  This test verifies that the fallback
+// produces correct results (both paths run on CPU, so outputs must match).
 TEST_F(HipDNNMhaTest, ScaledSdpa) {
   const std::vector<int64_t> q_shape = {2, 16, 256};
   const std::vector<int64_t> k_shape = {2, 16, 256};
