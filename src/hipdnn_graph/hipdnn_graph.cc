@@ -684,6 +684,7 @@ static Status AddSdpaNode(
     TensorAttrPtr& output_attr,
     int64_t& next_uid) {
   using namespace hipdnn_frontend::graph;
+  using hipdnn_frontend::PointwiseMode;
 
   // We need at least Q, K, V.
   if (input_attrs.size() < 3) {
@@ -751,13 +752,23 @@ static Status AddSdpaNode(
   SdpaAttributes sdpa_attrs;
   sdpa_attrs.set_compute_data_type(compute_dtype.value());
 
-  // Scale: default is 1/sqrt(head_size), can be overridden by attribute.
+  // Scale handling: hipDNN's SDPA engine always applies 1/sqrt(head_size)
+  // internally and cannot compile graphs with a custom attn_scale_value.
+  // To achieve a custom scale S, we pre-multiply Q by S*sqrt(head_size) so
+  // that after hipDNN applies 1/sqrt(head_size), the effective scale is S.
   float scale = GetFloatAttrOrDefault(node, "scale", 0.0f);
   if (scale != 0.0f) {
-    sdpa_attrs.attn_scale_value = scale;
-  } else {
-    sdpa_attrs.attn_scale_value =
-        1.0f / std::sqrt(static_cast<float>(head_size));
+    float default_scale = 1.0f / std::sqrt(static_cast<float>(head_size));
+    if (scale != default_scale) {
+      float pre_scale = scale * std::sqrt(static_cast<float>(head_size));
+      q_attr->set_data_type(compute_dtype.value());
+      auto scale_attr = CreateScalarTensorAttr(next_uid++, pre_scale);
+      PointwiseAttributes pw;
+      pw.set_mode(PointwiseMode::MUL)
+          .set_compute_data_type(compute_dtype.value());
+      q_attr = graph.pointwise(q_attr, scale_attr, pw);
+      q_attr->set_data_type(compute_dtype.value());
+    }
   }
 
   // Causal masking: unidirectional=1 means causal.
