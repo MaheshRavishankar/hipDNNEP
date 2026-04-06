@@ -33,7 +33,16 @@ std::once_flag g_init_flag;
 void* g_lib = nullptr;
 
 void initLibrary() {
-  g_lib = dlopen("libhipdnn_backend.so", RTLD_NOW | RTLD_LOCAL);
+  // Try the full path baked in at build time first — this avoids the need
+  // for LD_LIBRARY_PATH in test and lit environments.
+#ifdef HIPDNN_BACKEND_LIB_PATH
+  g_lib = dlopen(HIPDNN_BACKEND_LIB_PATH, RTLD_NOW | RTLD_LOCAL);
+#endif
+  // Fall back to the bare filename so the EP still works when deployed
+  // outside the build tree (the loader will search LD_LIBRARY_PATH / runpath).
+  if (!g_lib) {
+    g_lib = dlopen("libhipdnn_backend.so", RTLD_NOW | RTLD_LOCAL);
+  }
   if (!g_lib) {
     // Not fatal — the tool (hipdnn-ep-opt) may not need the runtime.
     // Calls to backend functions will return error status.

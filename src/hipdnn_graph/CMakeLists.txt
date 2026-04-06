@@ -34,6 +34,10 @@ target_include_directories(${LIB_NAME} SYSTEM PUBLIC
   ${ROCM_INCLUDE_DIR}
 )
 
+target_compile_definitions(${LIB_NAME} PRIVATE
+  HIPDNN_BACKEND_LIB_PATH="${THEROCK_DIST}/lib/libhipdnn_backend.so"
+)
+
 target_link_libraries(${LIB_NAME} PUBLIC
   hipdnn_ep::src::utils
   hip::host
