@@ -19,7 +19,6 @@ def create_mha_model(
     num_heads=4,
     head_size=64,
     unidirectional=0,
-    scale=0.0,
     output_file="mha_test.onnx",
 ):
     """Create a MultiHeadAttention model: output = SDPA(Q, K, V).
@@ -47,8 +46,6 @@ def create_mha_model(
     attrs = {"num_heads": num_heads}
     if unidirectional:
         attrs["unidirectional"] = 1
-    if scale != 0.0:
-        attrs["scale"] = scale
 
     node = helper.make_node(
         "MultiHeadAttention",
@@ -78,8 +75,7 @@ def create_mha_model(
     print(f"Saved MultiHeadAttention model to {output_file}")
     print(
         f"  B={batch_size}, S_q={seq_len_q}, S_kv={seq_len_kv}, "
-        f"H={num_heads}, D={head_size}, unidirectional={unidirectional}, "
-        f"scale={scale}"
+        f"H={num_heads}, D={head_size}, unidirectional={unidirectional}"
     )
 
     return model
@@ -95,7 +91,6 @@ if __name__ == "__main__":
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--head-size", type=int, default=64)
     parser.add_argument("--unidirectional", type=int, default=0)
-    parser.add_argument("--scale", type=float, default=0.0)
     parser.add_argument("--output", "-o", default="mha_test.onnx")
     args = parser.parse_args()
 
@@ -106,6 +101,5 @@ if __name__ == "__main__":
         num_heads=args.num_heads,
         head_size=args.head_size,
         unidirectional=args.unidirectional,
-        scale=args.scale,
         output_file=args.output,
     )
