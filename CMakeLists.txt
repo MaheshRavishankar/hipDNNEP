@@ -103,11 +103,12 @@ if(NOT EXISTS "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_c_api.h")
   message(FATAL_ERROR "ONNXRuntime headers not found at ${ONNXRUNTIME_INCLUDE_DIR}")
 endif()
 
-# Use DT_RPATH instead of DT_RUNPATH for all targets.  DT_RPATH propagates
-# to libraries loaded via dlopen, so the hipDNN backend's engine plugins
-# (loaded at runtime by the backend) inherit the search path and can find
-# their transitive dependencies (MIOpen, comgr, etc.) without requiring
-# LD_LIBRARY_PATH to be set.
+# Use DT_RPATH instead of DT_RUNPATH.  Unlike DT_RUNPATH, DT_RPATH
+# propagates to libraries loaded via dlopen — the hipDNN backend's engine
+# plugins (loaded at runtime by the backend) inherit the search path and
+# can resolve transitive dependencies (MIOpen, comgr, etc.) without
+# LD_LIBRARY_PATH.  Applied globally because all targets (the EP shared
+# lib, tests, and tools) benefit from consistent RPATH behavior.
 add_link_options("-Wl,--disable-new-dtags")
 
 # Main shared library (assembled from static libraries)

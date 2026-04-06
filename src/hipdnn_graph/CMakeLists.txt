@@ -34,6 +34,10 @@ target_include_directories(${LIB_NAME} SYSTEM PUBLIC
   ${ROCM_INCLUDE_DIR}
 )
 
+# Bake the absolute path to libhipdnn_backend.so so the dlopen shim can
+# find it without LD_LIBRARY_PATH.  This is a build/test convenience —
+# the shim falls back to the bare filename for deployed environments
+# where THEROCK_DIST may not be at the build-time path.
 target_compile_definitions(${LIB_NAME} PRIVATE
   HIPDNN_BACKEND_LIB_PATH="${THEROCK_DIST}/lib/libhipdnn_backend.so"
 )
