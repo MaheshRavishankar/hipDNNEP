@@ -1348,6 +1348,9 @@ Status HipDNNGraphImpl::Build(
       std::string name = input.GetName();
       auto it = symbol_table_.find(name);
       if (it == symbol_table_.end()) {
+        // SDPA ops (MHA/GQA) reference cross-attention inputs that may not
+        // be in the symbol table when the subgraph only covers self-attention.
+        // Skip missing inputs rather than failing.
         if (is_sdpa) continue;
         return Status::Failure("Input not found in symbol table: " + name);
       }
