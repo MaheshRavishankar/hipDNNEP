@@ -60,17 +60,17 @@ FnPtr resolve(const char* name) {
 }
 
 // Helper: resolve once via a function-local static.
-#define RESOLVE(name, type) \
+#define RESOLVE(name, type)              \
   static auto fn = resolve<type>(#name); \
   if (!fn) return HIPDNN_STATUS_INTERNAL_ERROR;
 
-#define RESOLVE_VOID(name, type) \
+#define RESOLVE_VOID(name, type)         \
   static auto fn = resolve<type>(#name); \
   if (!fn) return;
 
 // For functions returning const char* — return a descriptive string instead
 // of nullptr so callers that pass the result to printf/fprintf don't crash.
-#define RESOLVE_STR(name, type) \
+#define RESOLVE_STR(name, type)          \
   static auto fn = resolve<type>(#name); \
   if (!fn) return "(hipdnn_backend not loaded)";
 
