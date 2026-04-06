@@ -76,7 +76,11 @@ find_package(hip REQUIRED CONFIG)
 
 # Find hipDNN from TheRock
 find_package(hipdnn_frontend CONFIG REQUIRED)
-find_package(hipdnn_backend CONFIG REQUIRED)
+# hipdnn_backend is found transitively via hipdnn_frontend's find_dependency.
+# We do NOT link the hipdnn_backend target — instead, hipdnn_backend_shim.cc
+# loads libhipdnn_backend.so via dlopen(RTLD_LOCAL) at runtime to keep
+# libamd_comgr.so's libLLVM.so out of the global symbol table (avoiding
+# conflicts with torch-mlir's statically linked LLVM).
 
 # Find hipBLAS-LT from TheRock (optional)
 find_package(hipblaslt CONFIG)
