@@ -1386,19 +1386,15 @@ Status HipDNNGraphImpl::Build(
 
   graph_ = std::make_unique<Graph>();
 
-  // Set graph-level data types from the first graph input.  These are needed
-  // by ops like SDPA and RMSNorm whose engine lookup depends on graph-level
-  // types.  Some ops (e.g., RMSNorm) use fill_from_context to propagate data
-  // types to internally-created tensors; without graph-level defaults,
-  // engine heuristics may fail to find a matching configuration.
-  // For ops that set their own compute_data_type (Conv, pointwise, etc.)
-  // the per-op type takes precedence.
+  // Set graph-level data types.  io_data_type comes from the first input;
+  // intermediate and compute stay FLOAT (safe default for mixed-precision).
+  // Per-op compute_data_type calls override this where needed.
   if (!graph_inputs.empty()) {
     auto first_dtype = ToHipDNNDataType(GetTensorElementType(graph_inputs[0]));
     if (first_dtype.has_value()) {
       graph_->set_io_data_type(first_dtype.value())
-          .set_intermediate_data_type(first_dtype.value())
-          .set_compute_data_type(first_dtype.value());
+          .set_intermediate_data_type(hipdnn_frontend::DataType::FLOAT)
+          .set_compute_data_type(hipdnn_frontend::DataType::FLOAT);
     }
   }
 
