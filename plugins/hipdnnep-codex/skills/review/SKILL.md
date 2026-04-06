@@ -43,8 +43,20 @@ reviewing.
    - op-specific logic in generic code paths
    - rigid support checks without justification
    - tests that under-cover claimed support
+6. Test integrity
+   - verify there is evidence that all relevant tests passed
+   - treat failing CI or local test evidence as a blocker
+   - flag any disabled, skipped, or expected-fail tests used to avoid fixing code
+   - specifically flag `UNSUPPORTED`, `XFAIL`, `DISABLED_`, and CMake-level test exclusions
 
 Only report issues you can support from the current diff and code.
+
+## Hard Rules
+
+- The change is not ready if relevant tests are failing.
+- The change is not ready if there is no evidence that relevant tests passed.
+- Never accept disabling, skipping, or marking tests expected-fail to get a
+  change through review.
 
 ## Output
 
