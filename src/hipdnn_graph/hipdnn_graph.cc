@@ -574,7 +574,7 @@ Status AddMatMulNode(
 bool IsFusilliCompatibleOp(const std::string& op_type) {
   return op_type == "Conv" || op_type == "MatMul" || op_type == "Gemm" ||
          op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
-         op_type == "Div";
+         op_type == "Div" || op_type == "RotaryEmbedding";
 }
 
 // Map ONNX pointwise op name to hipDNN PointwiseMode.
@@ -812,7 +812,6 @@ static constexpr const char* kRoPEMlirTemplate = R"mlir(
     %int0 = torch.constant.int 0
     %int3 = torch.constant.int 3
     %int_neg1 = torch.constant.int -1
-    %none = torch.constant.none
 
     // Get head_size and compute half.
     %head_size = torch.aten.size.int %arg0, %int3 : !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>, !torch.int -> !torch.int

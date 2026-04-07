@@ -626,7 +626,6 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
 //   - interleaved = 0 (non-interleaved)
 //   - rotary_embedding_dim = 0 (full rotation) or = head_size
 //   - scale = 1.0 (default)
-//   - num_heads = 0 (not needed for 4D input)
 static bool IsSupportedRotaryEmbedding(Ort::ConstNode node) {
   try {
     std::string domain = node.GetDomain();

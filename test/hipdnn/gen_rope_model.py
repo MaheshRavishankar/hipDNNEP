@@ -46,7 +46,7 @@ def create_rope_model(
     """Create a RotaryEmbedding model.
 
     input shape:        [B, num_heads, S, head_size]
-    position_ids shape: [1, S]
+    position_ids shape: [B, S]
     cos_cache shape:    [S, head_size/2]
     sin_cache shape:    [S, head_size/2]
     output shape:       [B, num_heads, S, head_size]
