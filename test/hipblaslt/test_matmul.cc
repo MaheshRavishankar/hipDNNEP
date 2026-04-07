@@ -54,8 +54,8 @@ static void ReferenceMatMul(const float* a, const float* b, float* y,
 
 // Reference Gemm implementation for testing
 static void ReferenceGemm(const float* a, const float* b, const float* c,
-                           float* y, int m, int k, int n, bool trans_a,
-                           bool trans_b, float alpha, float beta) {
+                          float* y, int m, int k, int n, bool trans_a,
+                          bool trans_b, float alpha, float beta) {
   for (int i = 0; i < m; ++i) {
     for (int j = 0; j < n; ++j) {
       float sum = 0.0f;
