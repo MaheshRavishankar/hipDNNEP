@@ -176,3 +176,27 @@ add_dependencies(hipdnn_ep_tests generate_gqa_test_models)
 target_compile_definitions(hipdnn_ep_tests PRIVATE
   GQA_MHA_TEST_MODEL_PATH="${GQA_MHA_TEST_MODEL}"
 )
+
+# hipDNN (RotaryEmbedding / RoPE) test sources
+target_sources(hipdnn_ep_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_rope.cc
+)
+
+# Generate RotaryEmbedding test model
+set(ROPE_TEST_MODEL "${CMAKE_CURRENT_BINARY_DIR}/rope_test.onnx")
+
+add_custom_command(
+  OUTPUT ${ROPE_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_rope_model.py
+          --output ${ROPE_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_rope_model.py
+  COMMENT "Generating RoPE test model"
+  VERBATIM
+)
+
+add_custom_target(generate_rope_test_model DEPENDS ${ROPE_TEST_MODEL})
+add_dependencies(hipdnn_ep_tests generate_rope_test_model)
+
+target_compile_definitions(hipdnn_ep_tests PRIVATE
+  ROPE_TEST_MODEL_PATH="${ROPE_TEST_MODEL}"
+)

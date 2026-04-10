@@ -6,6 +6,7 @@
 
 #include <hipdnn_backend.h>
 #include <hipdnn_frontend.hpp>
+#include <hipdnn_frontend/attributes/CustomOpAttributes.hpp>
 #include <hipdnn_frontend/attributes/SdpaAttributes.hpp>
 
 #include <cassert>
@@ -573,7 +574,7 @@ Status AddMatMulNode(
 bool IsFusilliCompatibleOp(const std::string& op_type) {
   return op_type == "Conv" || op_type == "MatMul" || op_type == "Gemm" ||
          op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
-         op_type == "Div";
+         op_type == "Div" || op_type == "RotaryEmbedding";
 }
 
 // Map ONNX pointwise op name to hipDNN PointwiseMode.
@@ -782,6 +783,126 @@ static Status AddSdpaNode(
   return Status::Success();
 }
 
+// MLIR template for the RoPE custom op.
+// Inputs:
+//   %arg0: input  [B, H, S, D]   (float/half)
+//   %arg1: cos    [S, D/2]       (float/half)
+//   %arg2: sin    [S, D/2]       (float/half)
+// Output:
+//   %0:    output [B, H, S, D]   (same type as input)
+//
+// The template uses dynamic shapes (?).  Dtype placeholders are resolved
+// by the Fusilli CustomOpNode at emission time.
+//
+// Algorithm (non-interleaved):
+//   half = D / 2
+//   x1 = input[..., :half]        — first half
+//   x2 = input[..., half:]        — second half
+//   cos_4d = unsqueeze(unsqueeze(cos, 0), 0)  -> [1, 1, S, D/2]
+//   sin_4d = unsqueeze(unsqueeze(sin, 0), 0)  -> [1, 1, S, D/2]
+//   y1 = x1 * cos_4d - x2 * sin_4d
+//   y2 = x1 * sin_4d + x2 * cos_4d
+//   output = cat(y1, y2, dim=-1)
+static constexpr const char* kRoPEMlirTemplate = R"mlir(
+  func.func private @{FUNC_NAME}(
+      %arg0: !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>,
+      %arg1: !torch.vtensor<[?,?],{IN1_DTYPE}>,
+      %arg2: !torch.vtensor<[?,?],{IN2_DTYPE}>)
+      -> !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}> {
+    %int0 = torch.constant.int 0
+    %int3 = torch.constant.int 3
+    %int_neg1 = torch.constant.int -1
+
+    // Get head_size and compute half.
+    %head_size = torch.aten.size.int %arg0, %int3 : !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>, !torch.int -> !torch.int
+    %int2 = torch.constant.int 2
+    %half = torch.aten.floordiv.int %head_size, %int2 : !torch.int, !torch.int -> !torch.int
+
+    // Slice input: x1 = input[..., :half], x2 = input[..., half:]
+    %int1 = torch.constant.int 1
+    %x1 = torch.aten.slice.Tensor %arg0, %int3, %int0, %half, %int1 : !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>, !torch.int, !torch.int, !torch.int, !torch.int -> !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>
+    %x2 = torch.aten.slice.Tensor %arg0, %int3, %half, %head_size, %int1 : !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>, !torch.int, !torch.int, !torch.int, !torch.int -> !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>
+
+    // Unsqueeze cos/sin from [S, D/2] -> [1, 1, S, D/2] for broadcasting.
+    %cos_3d = torch.aten.unsqueeze %arg1, %int0 : !torch.vtensor<[?,?],{IN1_DTYPE}>, !torch.int -> !torch.vtensor<[?,?,?],{IN1_DTYPE}>
+    %cos_4d = torch.aten.unsqueeze %cos_3d, %int0 : !torch.vtensor<[?,?,?],{IN1_DTYPE}>, !torch.int -> !torch.vtensor<[?,?,?,?],{IN1_DTYPE}>
+    %sin_3d = torch.aten.unsqueeze %arg2, %int0 : !torch.vtensor<[?,?],{IN2_DTYPE}>, !torch.int -> !torch.vtensor<[?,?,?],{IN2_DTYPE}>
+    %sin_4d = torch.aten.unsqueeze %sin_3d, %int0 : !torch.vtensor<[?,?,?],{IN2_DTYPE}>, !torch.int -> !torch.vtensor<[?,?,?,?],{IN2_DTYPE}>
+
+    // y1 = x1 * cos - x2 * sin
+    %x1_cos = torch.aten.mul.Tensor %x1, %cos_4d : !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>, !torch.vtensor<[?,?,?,?],{IN1_DTYPE}> -> !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>
+    %x2_sin = torch.aten.mul.Tensor %x2, %sin_4d : !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>, !torch.vtensor<[?,?,?,?],{IN2_DTYPE}> -> !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>
+    %y1 = torch.aten.sub.Tensor %x1_cos, %x2_sin, %int1 : !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>, !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>, !torch.int -> !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>
+
+    // y2 = x1 * sin + x2 * cos
+    %x1_sin = torch.aten.mul.Tensor %x1, %sin_4d : !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>, !torch.vtensor<[?,?,?,?],{IN2_DTYPE}> -> !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>
+    %x2_cos = torch.aten.mul.Tensor %x2, %cos_4d : !torch.vtensor<[?,?,?,?],{IN0_DTYPE}>, !torch.vtensor<[?,?,?,?],{IN1_DTYPE}> -> !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>
+    %y2 = torch.aten.add.Tensor %x1_sin, %x2_cos, %int1 : !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>, !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>, !torch.int -> !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>
+
+    // output = cat(y1, y2, dim=-1)
+    %tensors = torch.prim.ListConstruct %y1, %y2 : (!torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>, !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>) -> !torch.list<vtensor>
+    %output = torch.aten.cat %tensors, %int_neg1 : !torch.list<vtensor>, !torch.int -> !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>
+    return %output : !torch.vtensor<[?,?,?,?],{OUT0_DTYPE}>
+  }
+)mlir";
+
+// Add RotaryEmbedding operation to hipDNN graph using a custom op.
+//
+// The EP support check ensures that position_ids-based gathering is not
+// needed: cos_cache/sin_cache shapes already match the input sequence
+// length (not max_sequence_length).  Only the three float tensors (input,
+// cos_cache, sin_cache) are passed to the custom op; position_ids (int64)
+// is skipped during graph input creation.
+//
+// The custom op embeds an MLIR function that implements the rotation using
+// torch dialect ops.  The Fusilli engine compiles this MLIR through IREE.
+static Status AddRoPENode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    TensorAttrPtr& output_attr,
+    int64_t& next_uid) {
+  using namespace hipdnn_frontend::graph;
+
+  // Expect 3 float inputs: input, cos_cache, sin_cache.
+  // (position_ids was skipped during graph input creation as int64.)
+  if (input_attrs.size() != 3) {
+    return Status::Failure(
+        "RotaryEmbedding requires 3 float inputs (input, cos, sin), got " +
+        std::to_string(input_attrs.size()));
+  }
+
+  auto x_attr = input_attrs[0];
+  auto cos_attr = input_attrs[1];
+  auto sin_attr = input_attrs[2];
+
+  if (IsScalarAttr(x_attr) || IsScalarAttr(cos_attr) || IsScalarAttr(sin_attr)) {
+    return Status::Failure("RotaryEmbedding inputs must be tensors, not scalars");
+  }
+
+  auto compute_dtype =
+      GetComputeDataType(x_attr->get_data_type(), cos_attr->get_data_type());
+  if (!compute_dtype.has_value()) {
+    return Status::Failure(
+        "Unsupported data type combination for RotaryEmbedding compute");
+  }
+
+  // Pack the MLIR template into the custom op data field as UTF-8 bytes.
+  std::string mlir(kRoPEMlirTemplate);
+  std::vector<uint8_t> mlir_data(mlir.begin(), mlir.end());
+
+  CustomOpAttributes custom_attrs;
+  custom_attrs.set_custom_op_id("fusilli.rope")
+      .set_compute_data_type(compute_dtype.value())
+      .set_data(std::move(mlir_data));
+
+  auto outputs = graph.custom_op(
+      {x_attr, cos_attr, sin_attr}, /*numOutputs=*/1, custom_attrs);
+
+  output_attr = outputs[0];
+  return Status::Success();
+}
+
 // Dispatch to appropriate Add*Node based on op_type.
 // Takes input tensor attributes, returns output tensor attributes.
 Status AddNode(
@@ -828,6 +949,14 @@ Status AddNode(
   if (op_type == "MultiHeadAttention" || op_type == "GroupQueryAttention") {
     TensorAttrPtr y_attr;
     auto status = AddSdpaNode(graph, node, input_attrs, y_attr, next_uid);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (op_type == "RotaryEmbedding") {
+    TensorAttrPtr y_attr;
+    auto status = AddRoPENode(graph, node, input_attrs, y_attr, next_uid);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -1335,8 +1464,13 @@ Status HipDNNGraphImpl::Build(
     input_attrs.reserve(node_inputs.size());
 
     std::string op_type = node.GetOperatorType();
-    bool is_sdpa = (op_type == "MultiHeadAttention" ||
-                    op_type == "GroupQueryAttention");
+    // Ops that may reference non-float inputs (e.g. int64 position_ids or
+    // seqlens_k) which are skipped during graph input creation.  Missing
+    // inputs are silently skipped for these ops.
+    bool has_non_float_inputs =
+        (op_type == "MultiHeadAttention" ||
+         op_type == "GroupQueryAttention" ||
+         op_type == "RotaryEmbedding");
 
     for (const auto& input : node_inputs) {
       // Empty-string optional inputs (e.g. past_key in GQA) appear as
@@ -1348,7 +1482,7 @@ Status HipDNNGraphImpl::Build(
         // SDPA ops (MHA/GQA) reference cross-attention inputs that may not
         // be in the symbol table when the subgraph only covers self-attention.
         // Skip missing inputs rather than failing.
-        if (is_sdpa) continue;
+        if (has_non_float_inputs) continue;
         return Status::Failure("Input not found in symbol table: " + name);
       }
       input_attrs.push_back(it->second);

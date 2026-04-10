@@ -615,6 +615,106 @@ static bool IsSupportedPointwise(Ort::ConstNode node) {
   }
 }
 
+// Check if a RotaryEmbedding contrib op is supported by this EP.
+// Supports the basic 4D case:
+//   - input:        [B, num_heads, S, head_size]
+//   - position_ids: [B, S]             (int64, not processed by hipDNN)
+//   - cos_cache:    [S, head_size/2]   (must match input S, not max_seq_len)
+//   - sin_cache:    [S, head_size/2]
+//   - output:       same as input
+// Constraints:
+//   - interleaved = 0 (non-interleaved)
+//   - rotary_embedding_dim = 0 (full rotation) or = head_size
+//   - scale = 1.0 (default)
+static bool IsSupportedRotaryEmbedding(Ort::ConstNode node) {
+  try {
+    std::string domain = node.GetDomain();
+    if (domain != "com.microsoft") {
+      return false;
+    }
+
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    // RotaryEmbedding has 4 inputs and 1 output.
+    if (inputs.size() != 4 || outputs.size() != 1) {
+      return false;
+    }
+
+    // Check input data type (float or float16).
+    ONNXTensorElementDataType x_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType o_type = GetTensorElementType(outputs[0]);
+
+    bool supported_type =
+        (x_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+         x_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) &&
+        x_type == o_type;
+
+    if (!supported_type) {
+      return false;
+    }
+
+    // cos_cache and sin_cache must have the same type as input.
+    ONNXTensorElementDataType cos_type = GetTensorElementType(inputs[2]);
+    ONNXTensorElementDataType sin_type = GetTensorElementType(inputs[3]);
+    if (cos_type != x_type || sin_type != x_type) {
+      return false;
+    }
+
+    // Input must be 4D: [B, num_heads, S, head_size].
+    auto x_shape = GetTensorShape(inputs[0]);
+    if (!x_shape.has_value() || x_shape->size() != 4) {
+      return false;
+    }
+
+    int64_t head_size = (*x_shape)[3];
+    int64_t seq_len = (*x_shape)[2];
+
+    // head_size must be even for splitting into real/imaginary halves.
+    if (head_size <= 0 || head_size % 2 != 0) {
+      return false;
+    }
+
+    // cos_cache must be 2D [S, head_size/2] where S matches input seq_len.
+    auto cos_shape = GetTensorShape(inputs[2]);
+    if (!cos_shape.has_value() || cos_shape->size() != 2) {
+      return false;
+    }
+    if ((*cos_shape)[0] != seq_len || (*cos_shape)[1] != head_size / 2) {
+      return false;
+    }
+
+    // sin_cache must have the same shape as cos_cache.
+    auto sin_shape = GetTensorShape(inputs[3]);
+    if (!sin_shape.has_value() || *sin_shape != *cos_shape) {
+      return false;
+    }
+
+    // Reject interleaved mode.
+    int64_t interleaved = GetIntAttrOrDefault(node, "interleaved", 0);
+    if (interleaved != 0) {
+      return false;
+    }
+
+    // rotary_embedding_dim must be 0 (full rotation) or equal to head_size.
+    int64_t rotary_dim = GetIntAttrOrDefault(node, "rotary_embedding_dim", 0);
+    if (rotary_dim != 0 && rotary_dim != head_size) {
+      return false;
+    }
+
+    // Reject custom scale (only default 1.0 supported).
+    float scale = GetFloatAttrOrDefault(node, "scale", 1.0f);
+    if (scale != 1.0f) {
+      return false;
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if an op is supported by this EP
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
@@ -652,6 +752,9 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   }
   if (op_type == "GroupQueryAttention") {
     return IsSupportedGroupQueryAttention(node);
+  }
+  if (op_type == "RotaryEmbedding") {
+    return IsSupportedRotaryEmbedding(node);
   }
 
   return false;
