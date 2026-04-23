@@ -905,7 +905,8 @@ static Status AddRoPENode(
 
 // Add SimplifiedLayerNormalization (RMS Norm) to the hipDNN graph.
 // ONNX: Y = X * Scale / sqrt(mean(X^2) + epsilon), normalizing over
-// dims [axis, rank).  Inputs: X, Scale.  Outputs: Y, optional inv_std_var.
+// dims [axis, rank).  Inputs: X, Scale.  Outputs: Y (INFERENCE only —
+// TRAINING with inv_std_var is filtered out in IsSupportedOp).
 //
 // Fusilli's RmsNormNode normalizes along the last dim of a tensor whose
 // leading dim is batch and whose scale has a single batch dim.  We
@@ -919,8 +920,11 @@ static Status AddRoPENode(
 //   Y:     [batch, norm_size]
 //
 // Each batch row is independently normalized by its own RMS, which
-// matches ONNX semantics.  The Build() loop restores the original
-// output shape before ORT sees it.
+// matches ONNX semantics.  Y is kept at [batch, norm_size] — Fusilli
+// validates Y.shape == X.shape, and ORT allocates the output tensor with
+// the ORT graph's original shape (held in output_shapes_), so the
+// collapsed view is transparent to the caller since both layouts hold
+// the same number of row-major contiguous elements.
 static Status AddRMSNormNode(
     hipdnn_frontend::graph::Graph& graph,
     Ort::ConstNode node,
@@ -943,12 +947,6 @@ static Status AddRMSNormNode(
     return Status::Failure(
         "SimplifiedLayerNormalization inputs must be tensors, not scalars");
   }
-
-  // Decide whether the optional inv_std_var output is requested.  ONNX
-  // signals "not requested" with an empty name on the output slot.
-  std::vector<Ort::ConstValueInfo> node_outputs = node.GetOutputs();
-  bool need_inv_std_var =
-      (node_outputs.size() > 1 && !node_outputs[1].GetName().empty());
 
   // Resolve axis attribute (default -1 per ONNX spec).
   auto x_dims = x_attr->get_dim();
@@ -974,37 +972,29 @@ static Status AddRMSNormNode(
   scale_attr->set_dim({1, norm_size});
   scale_attr->set_stride(ComputeStrides({1, norm_size}));
 
-  // Epsilon must be a pass-by-value scalar constant (fusilli requirement).
+  // Epsilon must be a pass-by-value scalar constant (Fusilli requirement).
   float epsilon = GetFloatAttrOrDefault(node, "epsilon", 1e-5f);
   auto epsilon_attr = CreateScalarTensorAttr(next_uid++, epsilon);
 
+  // ONNX stash_type=1 pins the intermediate reduction to FP32 regardless
+  // of input precision.  Set the node-level compute type explicitly so
+  // FP16 inputs still accumulate in FP32 (matching the graph-level
+  // compute type set in Build()).
   RMSNormAttributes rmsnorm_attrs;
-  rmsnorm_attrs
-      .set_forward_phase(need_inv_std_var ? NormFwdPhase::TRAINING
-                                          : NormFwdPhase::INFERENCE)
+  rmsnorm_attrs.set_forward_phase(NormFwdPhase::INFERENCE)
       .set_epsilon(epsilon_attr)
-      .set_compute_data_type(x_attr->get_data_type());
+      .set_compute_data_type(hipdnn_frontend::DataType::FLOAT);
 
   // graph.rmsnorm() returns {Y, INV_RMS}.  INV_RMS is nullptr in INFERENCE.
   auto [y_attr, inv_rms_attr] =
       graph.rmsnorm(x_attr, scale_attr, rmsnorm_attrs);
+  (void)inv_rms_attr;  // unused — TRAINING is rejected at capability check
 
-  // Set Y to the same collapsed [batch, norm_size] shape.  The Build()
-  // loop overwrites this with the ORT graph's original output shape
-  // before ORT allocates the output tensor.
+  // Keep Y at [batch, norm_size] so Fusilli's Y.shape == X.shape validation
+  // passes; ORT's output tensor allocation is driven by output_shapes_.
   y_attr->set_dim({batch, norm_size});
   y_attr->set_stride(ComputeStrides({batch, norm_size}));
   output_attrs.push_back(y_attr);
-
-  if (need_inv_std_var) {
-    // Per fusilli's RmsNorm validation: INV_RMS must have the same rank
-    // as X with batch dim equal to X's batch and all other dims = 1.
-    assert(inv_rms_attr != nullptr &&
-           "TRAINING phase must produce inv_rms output");
-    inv_rms_attr->set_dim({batch, 1});
-    inv_rms_attr->set_stride(ComputeStrides({batch, 1}));
-    output_attrs.push_back(inv_rms_attr);
-  }
 
   return Status::Success();
 }
