@@ -211,6 +211,24 @@ hipdnnStatus_t hipdnnBackendGetSerializedBinaryGraph_ext(
   return fn(descriptor, requestedByteSize, graphByteSize, serializedGraph);
 }
 
+hipdnnStatus_t hipdnnBackendGetSerializedJsonGraph_ext(
+    hipdnnBackendDescriptor_t descriptor, size_t requestedByteSize,
+    size_t* graphByteSize, char* serializedJsonGraph) {
+  using Fn = hipdnnStatus_t (*)(hipdnnBackendDescriptor_t, size_t, size_t*,
+                                char*);
+  RESOLVE(hipdnnBackendGetSerializedJsonGraph_ext, Fn);
+  return fn(descriptor, requestedByteSize, graphByteSize, serializedJsonGraph);
+}
+
+hipdnnStatus_t hipdnnBackendCreateAndDeserializeJsonGraph_ext(
+    hipdnnBackendDescriptor_t* descriptor, const char* jsonGraph,
+    size_t jsonByteSize) {
+  using Fn = hipdnnStatus_t (*)(hipdnnBackendDescriptor_t*, const char*,
+                                size_t);
+  RESOLVE(hipdnnBackendCreateAndDeserializeJsonGraph_ext, Fn);
+  return fn(descriptor, jsonGraph, jsonByteSize);
+}
+
 void hipdnnLoggingCallback_ext(hipdnnSeverity_t severity, const char* msg) {
   using Fn = void (*)(hipdnnSeverity_t, const char*);
   RESOLVE_VOID(hipdnnLoggingCallback_ext, Fn);

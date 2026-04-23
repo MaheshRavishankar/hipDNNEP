@@ -200,3 +200,62 @@ add_dependencies(hipdnn_ep_tests generate_rope_test_model)
 target_compile_definitions(hipdnn_ep_tests PRIVATE
   ROPE_TEST_MODEL_PATH="${ROPE_TEST_MODEL}"
 )
+
+# hipDNN (SimplifiedLayerNormalization / RMS Norm) test sources
+target_sources(hipdnn_ep_tests PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_simplified_layer_norm.cc
+)
+
+# Generate SimplifiedLayerNormalization test models
+set(SIMPLIFIED_LAYER_NORM_TEST_MODEL
+    "${CMAKE_CURRENT_BINARY_DIR}/simplified_layer_norm_test.onnx")
+set(SIMPLIFIED_LAYER_NORM_RANK2_TEST_MODEL
+    "${CMAKE_CURRENT_BINARY_DIR}/simplified_layer_norm_rank2_test.onnx")
+set(SIMPLIFIED_LAYER_NORM_AXIS1_TEST_MODEL
+    "${CMAKE_CURRENT_BINARY_DIR}/simplified_layer_norm_axis1_test.onnx")
+
+add_custom_command(
+  OUTPUT ${SIMPLIFIED_LAYER_NORM_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/gen_simplified_layer_norm_model.py
+          --output ${SIMPLIFIED_LAYER_NORM_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_simplified_layer_norm_model.py
+  COMMENT "Generating SimplifiedLayerNormalization test model"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${SIMPLIFIED_LAYER_NORM_RANK2_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/gen_simplified_layer_norm_model.py
+          --x-shape 8 64 --axis -1
+          --output ${SIMPLIFIED_LAYER_NORM_RANK2_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_simplified_layer_norm_model.py
+  COMMENT "Generating SimplifiedLayerNormalization rank-2 test model"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${SIMPLIFIED_LAYER_NORM_AXIS1_TEST_MODEL}
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/gen_simplified_layer_norm_model.py
+          --x-shape 2 4 8 8 --axis 1
+          --output ${SIMPLIFIED_LAYER_NORM_AXIS1_TEST_MODEL}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_simplified_layer_norm_model.py
+  COMMENT "Generating SimplifiedLayerNormalization axis=1 test model"
+  VERBATIM
+)
+
+add_custom_target(generate_simplified_layer_norm_test_models
+  DEPENDS
+    ${SIMPLIFIED_LAYER_NORM_TEST_MODEL}
+    ${SIMPLIFIED_LAYER_NORM_RANK2_TEST_MODEL}
+    ${SIMPLIFIED_LAYER_NORM_AXIS1_TEST_MODEL}
+)
+add_dependencies(hipdnn_ep_tests generate_simplified_layer_norm_test_models)
+
+target_compile_definitions(hipdnn_ep_tests PRIVATE
+  SIMPLIFIED_LAYER_NORM_TEST_MODEL_PATH="${SIMPLIFIED_LAYER_NORM_TEST_MODEL}"
+  SIMPLIFIED_LAYER_NORM_RANK2_TEST_MODEL_PATH="${SIMPLIFIED_LAYER_NORM_RANK2_TEST_MODEL}"
+  SIMPLIFIED_LAYER_NORM_AXIS1_TEST_MODEL_PATH="${SIMPLIFIED_LAYER_NORM_AXIS1_TEST_MODEL}"
+)
