@@ -809,6 +809,154 @@ static bool IsSupportedSimplifiedLayerNorm(Ort::ConstNode node) {
   }
 }
 
+// Resolve the axes of an ONNX Reduce* node to a concrete vector.
+//
+// Handles both the attribute form (opset < 13, plus opset < 18 for most
+// Reduce* ops other than ReduceSum) and the 2nd-input form (opset 13+
+// ReduceSum, opset 18+ all Reduce*).  Returns std::nullopt when the axes
+// cannot be resolved statically — for example, the input is present but
+// is not a constant initializer.  An *absent* axes attribute/input
+// returns an empty vector, which ONNX interprets as "reduce all axes"
+// when noop_with_empty_axes == 0.
+static std::optional<std::vector<int64_t>> ResolveReductionAxesFromNode(
+    Ort::ConstNode node) {
+  // Attribute form.
+  Ort::ConstOpAttr attr{nullptr};
+  auto attr_status = node.GetAttributeByName("axes", attr);
+  if (attr_status.IsOK() && static_cast<const OrtOpAttr*>(attr)) {
+    std::vector<int64_t> axes;
+    if (attr.GetValueArray(axes).IsOK()) {
+      return axes;
+    }
+    return std::nullopt;
+  }
+
+  // Input form.
+  std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+  if (inputs.size() < 2 || !inputs[1]) {
+    return std::vector<int64_t>{};  // Axes absent — ONNX "reduce all".
+  }
+  if (!inputs[1].IsConstantInitializer()) {
+    return std::nullopt;  // Dynamic axes can't be resolved at partition time.
+  }
+  Ort::ConstValue init_value{nullptr};
+  if (!inputs[1].GetInitializer(init_value).IsOK() || init_value == nullptr) {
+    return std::nullopt;
+  }
+  auto type_shape = init_value.GetTensorTypeAndShapeInfo();
+  size_t n = type_shape.GetElementCount();
+  const int64_t* data = init_value.GetTensorData<int64_t>();
+  if (data == nullptr) {
+    return std::nullopt;
+  }
+  return std::vector<int64_t>(data, data + n);
+}
+
+// Compute the keep-dims output shape of an ONNX Reduce* op.  Negative
+// axes are normalised; an empty axes list reduces every dimension.
+// Mirrors ComputeReductionKeepDimsShape in hipdnn_graph.cc (kept in sync
+// by IsSupportedReduction below, which validates the declared output
+// shape against this computation before claiming the op).
+static std::vector<int64_t> ExpectedReductionKeepDimsShape(
+    const std::vector<int64_t>& x_shape,
+    const std::vector<int64_t>& axes) {
+  int64_t rank = static_cast<int64_t>(x_shape.size());
+  std::vector<bool> is_reduced(rank, false);
+  if (axes.empty()) {
+    std::fill(is_reduced.begin(), is_reduced.end(), true);
+  } else {
+    for (int64_t a : axes) {
+      int64_t axis = (a < 0) ? (a + rank) : a;
+      if (axis >= 0 && axis < rank) {
+        is_reduced[axis] = true;
+      }
+    }
+  }
+  std::vector<int64_t> y_shape = x_shape;
+  for (int64_t i = 0; i < rank; ++i) {
+    if (is_reduced[i]) y_shape[i] = 1;
+  }
+  return y_shape;
+}
+
+// Check if an ONNX Reduce* op is supported by this EP.
+//
+// Keep the accepted op types in sync with GetReductionMode() in
+// src/hipdnn_graph/hipdnn_graph.cc.  Only the keep-dims form is
+// supported — hipDNN's ReductionNode requires input and output to have
+// the same rank.  Also reject the noop_with_empty_axes identity case
+// (explicit or implicit empty axes with the flag set) since it is not
+// a reduction at all.
+static bool IsSupportedReduction(Ort::ConstNode node) {
+  try {
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    if (inputs.empty() || outputs.size() != 1) {
+      return false;
+    }
+
+    // Check dtypes — input and output must share a supported float type.
+    ONNXTensorElementDataType x_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
+    if (x_type != y_type) {
+      return false;
+    }
+    if (x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      return false;
+    }
+
+    // Static shapes only.
+    auto x_shape_opt = GetTensorShape(inputs[0]);
+    auto y_shape_opt = GetTensorShape(outputs[0]);
+    if (!x_shape_opt.has_value() || !y_shape_opt.has_value()) {
+      return false;
+    }
+
+    // Only keep-dims form: same rank in and out, reduced dims are 1.
+    // ONNX default for keepdims is 1, so a missing attribute is OK.
+    int64_t keepdims = GetIntAttrOrDefault(node, "keepdims", 1);
+    if (keepdims != 1) {
+      return false;
+    }
+    if (x_shape_opt->size() != y_shape_opt->size()) {
+      return false;
+    }
+
+    // Resolve axes to a concrete list.  nullopt means a dynamic axes input
+    // we can't peek at — reject so the CPU EP can handle it.
+    auto axes = ResolveReductionAxesFromNode(node);
+    if (!axes.has_value()) {
+      return false;
+    }
+
+    // Empty axes + noop_with_empty_axes == 1 means identity; let the CPU
+    // EP handle it rather than emitting a hipDNN reduction that reduces
+    // over nothing.  This covers both absent axes and an explicitly
+    // empty axes initializer/attribute.
+    int64_t noop_empty = GetIntAttrOrDefault(node, "noop_with_empty_axes", 0);
+    if (axes->empty() && noop_empty != 0) {
+      return false;
+    }
+
+    // Validate the declared output shape matches what we would emit.
+    // AddReductionNode overrides hipDNN's output tensor with the shape
+    // we compute, so a mismatch here would silently produce a tensor
+    // whose shape disagrees with what downstream consumers see.
+    auto expected_y_shape =
+        ExpectedReductionKeepDimsShape(*x_shape_opt, *axes);
+    if (expected_y_shape != *y_shape_opt) {
+      return false;
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if an op is supported by this EP
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
@@ -838,6 +986,20 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   // in src/hipdnn_graph/hipdnn_graph.cc.
   if (op_type == "Sigmoid") {
     return IsSupportedUnaryPointwise(node);
+  }
+
+  // Reduction ops.  GetReductionMode() in hipdnn_graph.cc maps the full set
+  // of ONNX Reduce* ops onto hipDNN ReductionMode values, but only the ops
+  // listed here are advertised as supported because the upstream Fusilli
+  // engine currently handles them end-to-end.  The other Reduce* ops fall
+  // into two categories:
+  //   - ReduceMean/L1/L2/Prod: Fusilli rejects them at plan creation
+  //     ("Unsupported reduction mode"), so session build would fail.
+  //   - ReduceMin/Max: the Fusilli kernel compiles and runs but produces a
+  //     memory-safety violation at execute time.
+  // Extend this list as upstream Fusilli support lands.
+  if (op_type == "ReduceSum") {
+    return IsSupportedReduction(node);
   }
 
   // Contrib ops (com.microsoft domain)
