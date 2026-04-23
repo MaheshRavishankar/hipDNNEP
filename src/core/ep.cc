@@ -809,6 +809,86 @@ static bool IsSupportedSimplifiedLayerNorm(Ort::ConstNode node) {
   }
 }
 
+// Check if an ONNX Reduce* op is supported by this EP.
+//
+// Keep the accepted op types in sync with GetReductionMode() in
+// src/hipdnn_graph/hipdnn_graph.cc.  Only the keep-dims form is
+// supported — hipDNN's ReductionNode requires input and output to have
+// the same rank.  `noop_with_empty_axes = 1` is likewise rejected to
+// avoid emitting a hipDNN op for what is semantically an identity.
+static bool IsSupportedReduction(Ort::ConstNode node) {
+  try {
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    if (inputs.empty() || outputs.size() != 1) {
+      return false;
+    }
+
+    // Check dtypes — input and output must share a supported float type.
+    ONNXTensorElementDataType x_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
+    if (x_type != y_type) {
+      return false;
+    }
+    if (x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      return false;
+    }
+
+    // Static shapes only.
+    auto x_shape = GetTensorShape(inputs[0]);
+    auto y_shape_opt = GetTensorShape(outputs[0]);
+    if (!x_shape.has_value() || !y_shape_opt.has_value()) {
+      return false;
+    }
+
+    // Only keep-dims form: same rank in and out, reduced dims are 1.
+    // ONNX default for keepdims is 1, so a missing attribute is OK.
+    int64_t keepdims = GetIntAttrOrDefault(node, "keepdims", 1);
+    if (keepdims != 1) {
+      return false;
+    }
+    if (x_shape->size() != y_shape_opt->size()) {
+      return false;
+    }
+
+    // Reject the identity-on-empty-axes case — we'd otherwise emit a
+    // hipDNN reduction that reduces over nothing.
+    int64_t noop_empty = GetIntAttrOrDefault(node, "noop_with_empty_axes", 0);
+
+    // Resolve axes: attribute form (opset < 13) or 2nd input constant
+    // initializer (opset 13+ ReduceSum, opset 18+ all).
+    bool has_axes_attr = false;
+    {
+      Ort::ConstOpAttr attr{nullptr};
+      auto st = node.GetAttributeByName("axes", attr);
+      has_axes_attr =
+          st.IsOK() && static_cast<const OrtOpAttr*>(attr);
+    }
+    bool has_axes_input = false;
+    if (inputs.size() >= 2 && inputs[1]) {
+      // The axes input must be a constant initializer — we can't peek at
+      // runtime values during partitioning.
+      if (!inputs[1].IsConstantInitializer()) {
+        return false;
+      }
+      has_axes_input = true;
+    }
+
+    if (!has_axes_attr && !has_axes_input && noop_empty != 0) {
+      // No axes + noop_with_empty_axes == 1 means identity; let the CPU
+      // EP handle it rather than emitting a hipDNN reduction.
+      return false;
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if an op is supported by this EP
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
@@ -838,6 +918,20 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   // in src/hipdnn_graph/hipdnn_graph.cc.
   if (op_type == "Sigmoid") {
     return IsSupportedUnaryPointwise(node);
+  }
+
+  // Reduction ops.  GetReductionMode() in hipdnn_graph.cc maps the full set
+  // of ONNX Reduce* ops onto hipDNN ReductionMode values, but only the ops
+  // listed here are advertised as supported because the upstream Fusilli
+  // engine currently handles them end-to-end.  The other Reduce* ops fall
+  // into two categories:
+  //   - ReduceMean/L1/L2/Prod: Fusilli rejects them at plan creation
+  //     ("Unsupported reduction mode"), so session build would fail.
+  //   - ReduceMin/Max: the Fusilli kernel compiles and runs but produces a
+  //     memory-safety violation at execute time.
+  // Extend this list as upstream Fusilli support lands.
+  if (op_type == "ReduceSum") {
+    return IsSupportedReduction(node);
   }
 
   // Contrib ops (com.microsoft domain)

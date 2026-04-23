@@ -574,7 +574,11 @@ Status AddMatMulNode(
 bool IsFusilliCompatibleOp(const std::string& op_type) {
   return op_type == "Conv" || op_type == "MatMul" || op_type == "Gemm" ||
          op_type == "Mul" || op_type == "Sub" || op_type == "Add" ||
-         op_type == "Div" || op_type == "RotaryEmbedding";
+         op_type == "Div" || op_type == "RotaryEmbedding" ||
+         op_type == "ReduceSum" || op_type == "ReduceMean" ||
+         op_type == "ReduceMax" || op_type == "ReduceMin" ||
+         op_type == "ReduceProd" || op_type == "ReduceL1" ||
+         op_type == "ReduceL2";
 }
 
 // Map ONNX pointwise op name to hipDNN PointwiseMode.
@@ -628,6 +632,146 @@ Status AddPointwiseNode(
   PointwiseAttributes pw;
   pw.set_mode(mode.value()).set_compute_data_type(a_attr->get_data_type());
   output_attr = graph.pointwise(a_attr, b_attr, pw);
+
+  return Status::Success();
+}
+
+// Map ONNX reduction op name to hipDNN ReductionMode.
+// Keep the op names in sync with ep.cc (IsSupportedOp) and
+// IsFusilliCompatibleOp above.
+static std::optional<hipdnn_frontend::ReductionMode> GetReductionMode(
+    const std::string& op_type) {
+  using hipdnn_frontend::ReductionMode;
+  if (op_type == "ReduceSum") return ReductionMode::ADD;
+  if (op_type == "ReduceProd") return ReductionMode::MUL;
+  if (op_type == "ReduceMin") return ReductionMode::MIN;
+  if (op_type == "ReduceMax") return ReductionMode::MAX;
+  if (op_type == "ReduceMean") return ReductionMode::AVG;
+  if (op_type == "ReduceL1") return ReductionMode::NORM1;
+  if (op_type == "ReduceL2") return ReductionMode::NORM2;
+  return std::nullopt;
+}
+
+// Extract the reduction axes from an ONNX Reduce* node.
+//
+// ONNX places `axes` differently depending on opset:
+//   - Opset < 13 (and opset < 18 for most Reduce ops): `axes` is an
+//     integer-array attribute.
+//   - Opset 13+ ReduceSum / opset 18+ all Reduce*: `axes` is the second
+//     input, expected to be a 1-D int64 constant initializer.
+//
+// Returns the axes vector on success or std::nullopt if axes is missing
+// (e.g. opset 13+ with no `axes` input supplied).  Callers must apply
+// ONNX's `noop_with_empty_axes` semantics when axes is missing or empty.
+static std::optional<std::vector<int64_t>> GetReductionAxes(
+    Ort::ConstNode node) {
+  // Attribute form (older opsets).
+  Ort::ConstOpAttr attr{nullptr};
+  auto status = node.GetAttributeByName("axes", attr);
+  if (status.IsOK() && static_cast<const OrtOpAttr*>(attr)) {
+    std::vector<int64_t> axes;
+    if (attr.GetValueArray(axes).IsOK()) {
+      return axes;
+    }
+  }
+
+  // Input form (opset 13+ ReduceSum, opset 18+ other Reduce*).
+  std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+  if (inputs.size() < 2 || !inputs[1]) {
+    return std::nullopt;
+  }
+  if (!inputs[1].IsConstantInitializer()) {
+    return std::nullopt;  // Dynamic axes not supported.
+  }
+  Ort::ConstValue init_value{nullptr};
+  if (!inputs[1].GetInitializer(init_value).IsOK() || init_value == nullptr) {
+    return std::nullopt;
+  }
+  auto type_shape = init_value.GetTensorTypeAndShapeInfo();
+  size_t n = type_shape.GetElementCount();
+  const int64_t* data = init_value.GetTensorData<int64_t>();
+  if (data == nullptr) {
+    return std::nullopt;
+  }
+  return std::vector<int64_t>(data, data + n);
+}
+
+// Compute the keep-dims output shape of an ONNX Reduce* op.
+// Reduced axes are set to 1; all other dims are preserved.  Negative axes
+// are normalised against the input rank.  When `axes` is empty the entire
+// tensor is reduced (every dim becomes 1), matching ONNX's default
+// behaviour when `noop_with_empty_axes == 0`.
+static std::vector<int64_t> ComputeReductionKeepDimsShape(
+    const std::vector<int64_t>& x_shape,
+    const std::vector<int64_t>& axes) {
+  int64_t rank = static_cast<int64_t>(x_shape.size());
+  std::vector<bool> is_reduced(rank, false);
+  if (axes.empty()) {
+    std::fill(is_reduced.begin(), is_reduced.end(), true);
+  } else {
+    for (int64_t a : axes) {
+      int64_t axis = (a < 0) ? (a + rank) : a;
+      if (axis >= 0 && axis < rank) {
+        is_reduced[axis] = true;
+      }
+    }
+  }
+  std::vector<int64_t> y_shape = x_shape;
+  for (int64_t i = 0; i < rank; ++i) {
+    if (is_reduced[i]) y_shape[i] = 1;
+  }
+  return y_shape;
+}
+
+// Add an ONNX Reduce* operation to the hipDNN graph.
+//
+// Only the keep-dims form is handled here — the caller (IsSupportedOp)
+// rejects nodes with `keepdims = 0` so we always emit a reduction whose
+// output rank matches the input rank.  hipDNN's ReductionNode requires
+// this invariant.
+//
+// The reduced output shape is computed from the input shape and the
+// `axes` attribute/input; hipDNN infers nothing about reduction shapes.
+static Status AddReductionNode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    TensorAttrPtr& output_attr) {
+  using namespace hipdnn_frontend::graph;
+
+  if (input_attrs.empty()) {
+    return Status::Failure(
+        "Reduction op requires at least 1 input tensor attribute");
+  }
+
+  std::string op_type = node.GetOperatorType();
+  auto mode = GetReductionMode(op_type);
+  if (!mode.has_value()) {
+    return Status::Failure("Unsupported reduction op type: " + op_type);
+  }
+
+  const auto& x_attr = input_attrs[0];
+  const auto& x_shape = x_attr->get_dim();
+
+  // Resolve the axes list (attribute or constant input).  Absent axes
+  // means reduce-all when noop_with_empty_axes == 0 (ONNX default); the
+  // noop case is rejected in IsSupportedReduction.
+  auto axes = GetReductionAxes(node);
+  std::vector<int64_t> axes_vec = axes.value_or(std::vector<int64_t>{});
+
+  auto y_shape = ComputeReductionKeepDimsShape(x_shape, axes_vec);
+
+  auto y_attr = std::make_shared<TensorAttributes>();
+  y_attr->set_dim(y_shape)
+      .set_stride(ComputeStrides(y_shape))
+      .set_data_type(x_attr->get_data_type());
+
+  ReductionAttributes attrs;
+  attrs.set_mode(mode.value());
+  // hipDNN's 3-arg reduction() form takes an explicit output tensor so we
+  // can control the reduced shape precisely.  The returned pointer is
+  // the same y_attr we passed in.
+  output_attr = graph.reduction(x_attr, y_attr, attrs);
 
   return Status::Success();
 }
@@ -1037,6 +1181,14 @@ Status AddNode(
   if (GetUnaryPointwiseMode(op_type).has_value()) {
     TensorAttrPtr y_attr;
     auto status = AddUnaryPointwiseNode(graph, node, input_attrs, y_attr);
+    if (status.failed()) return status;
+    output_attrs.push_back(y_attr);
+    return Status::Success();
+  }
+
+  if (GetReductionMode(op_type).has_value()) {
+    TensorAttrPtr y_attr;
+    auto status = AddReductionNode(graph, node, input_attrs, y_attr);
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
@@ -1567,10 +1719,15 @@ Status HipDNNGraphImpl::Build(
     // Ops that may reference non-float inputs (e.g. int64 position_ids or
     // seqlens_k) which are skipped during graph input creation.  Missing
     // inputs are silently skipped for these ops.
+    // Reduce* ops (opset 13+ ReduceSum, opset 18+ all Reduce) carry the
+    // reduction axes as an int64 constant input which is dropped from the
+    // symbol table — AddReductionNode reads the axes directly from the
+    // initializer, so the missing input must be silently skipped here.
     bool has_non_float_inputs =
         (op_type == "MultiHeadAttention" ||
          op_type == "GroupQueryAttention" ||
-         op_type == "RotaryEmbedding");
+         op_type == "RotaryEmbedding" ||
+         GetReductionMode(op_type).has_value());
 
     for (const auto& input : node_inputs) {
       // Empty-string optional inputs (e.g. past_key in GQA) appear as
