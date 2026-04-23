@@ -715,6 +715,87 @@ static bool IsSupportedRotaryEmbedding(Ort::ConstNode node) {
   }
 }
 
+// Check if a SimplifiedLayerNormalization (RMS Norm) node is supported.
+// This is a Microsoft contrib op registered by ONNX Runtime in the default
+// ("") ONNX domain — not in "com.microsoft".
+// Y = X * Scale / sqrt(mean(X^2) + eps).
+// Inputs: X (tensor), Scale (tensor).
+// Outputs: Y (tensor), optional inv_std_var (only produced in TRAINING phase).
+// Attributes: axis, epsilon, stash_type.
+static bool IsSupportedSimplifiedLayerNorm(Ort::ConstNode node) {
+  try {
+    std::string domain = node.GetDomain();
+    if (!domain.empty() && domain != "com.microsoft") {
+      return false;
+    }
+
+    std::vector<Ort::ConstValueInfo> inputs = node.GetInputs();
+    std::vector<Ort::ConstValueInfo> outputs = node.GetOutputs();
+
+    if (inputs.size() != 2 || outputs.empty() || outputs.size() > 2) {
+      return false;
+    }
+
+    // X and Scale must be float32 or float16 with matching types; Y type
+    // must also match (per ONNX spec it propagates from X).  hipDNN does
+    // not cast between input types, so mixed precision is rejected.
+    ONNXTensorElementDataType x_type = GetTensorElementType(inputs[0]);
+    ONNXTensorElementDataType scale_type = GetTensorElementType(inputs[1]);
+    ONNXTensorElementDataType y_type = GetTensorElementType(outputs[0]);
+    if (x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT &&
+        x_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      return false;
+    }
+    if (x_type != scale_type || x_type != y_type) {
+      return false;
+    }
+
+    auto x_shape = GetTensorShape(inputs[0]);
+    auto scale_shape = GetTensorShape(inputs[1]);
+    if (!x_shape.has_value() || !scale_shape.has_value()) {
+      return false;
+    }
+
+    // Fusilli's RMSNorm requires X rank >= 2.
+    int64_t rank = static_cast<int64_t>(x_shape->size());
+    if (rank < 2) {
+      return false;
+    }
+
+    // axis resolves to [0, rank).  The graph builder collapses X into a
+    // 4D view around this axis, so any in-range value works.
+    int64_t axis = GetIntAttrOrDefault(node, "axis", -1);
+    if (axis < 0) {
+      axis += rank;
+    }
+    if (axis < 0 || axis >= rank) {
+      return false;
+    }
+
+    // stash_type == 1 (float32) is the ONNX default and the only mode
+    // hipDNN's RMSNorm exposes for intermediate reductions.
+    int64_t stash_type = GetIntAttrOrDefault(node, "stash_type", 1);
+    if (stash_type != 1) {
+      return false;
+    }
+
+    // Optional inv_std_var (second output) requires TRAINING phase.  ONNX
+    // signals "not requested" with an empty output name; we support both
+    // "output omitted" and "output explicitly requested".
+    if (outputs.size() == 2 && !outputs[1].GetName().empty()) {
+      ONNXTensorElementDataType inv_type = GetTensorElementType(outputs[1]);
+      if (inv_type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        return false;
+      }
+    }
+
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
 // Check if an op is supported by this EP
 static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   std::string op_type = node.GetOperatorType();
@@ -755,6 +836,9 @@ static bool IsSupportedOp(Ort::ConstNode node, bool matmul_supported) {
   }
   if (op_type == "RotaryEmbedding") {
     return IsSupportedRotaryEmbedding(node);
+  }
+  if (op_type == "SimplifiedLayerNormalization") {
+    return IsSupportedSimplifiedLayerNorm(node);
   }
 
   return false;

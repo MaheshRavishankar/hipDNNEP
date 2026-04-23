@@ -903,6 +903,112 @@ static Status AddRoPENode(
   return Status::Success();
 }
 
+// Add SimplifiedLayerNormalization (RMS Norm) to the hipDNN graph.
+// ONNX: Y = X * Scale / sqrt(mean(X^2) + epsilon), normalizing over
+// dims [axis, rank).  Inputs: X, Scale.  Outputs: Y, optional inv_std_var.
+//
+// Fusilli's RmsNormNode normalizes along the last dim of a tensor whose
+// leading dim is batch and whose scale has a single batch dim.  We
+// collapse the ONNX shape into a 2D view that matches these constraints:
+//
+//   batch     = product(d_0 … d_{axis-1})   (dims NOT normalized)
+//   norm_size = product(d_axis … d_{rank-1}) (dims normalized)
+//
+//   X:     [d_0, …, d_{rank-1}]     -> [batch, norm_size]
+//   Scale: [d_axis, …, d_{rank-1}]  -> [1,     norm_size]
+//   Y:     [batch, norm_size]
+//
+// Each batch row is independently normalized by its own RMS, which
+// matches ONNX semantics.  The Build() loop restores the original
+// output shape before ORT sees it.
+static Status AddRMSNormNode(
+    hipdnn_frontend::graph::Graph& graph,
+    Ort::ConstNode node,
+    const std::vector<TensorAttrPtr>& input_attrs,
+    std::vector<TensorAttrPtr>& output_attrs,
+    int64_t& next_uid) {
+  using namespace hipdnn_frontend::graph;
+  using hipdnn_frontend::NormFwdPhase;
+
+  if (input_attrs.size() != 2) {
+    return Status::Failure(
+        "SimplifiedLayerNormalization requires 2 inputs (X, Scale), got " +
+        std::to_string(input_attrs.size()));
+  }
+
+  auto x_attr = input_attrs[0];
+  auto scale_attr = input_attrs[1];
+
+  if (IsScalarAttr(x_attr) || IsScalarAttr(scale_attr)) {
+    return Status::Failure(
+        "SimplifiedLayerNormalization inputs must be tensors, not scalars");
+  }
+
+  // Decide whether the optional inv_std_var output is requested.  ONNX
+  // signals "not requested" with an empty name on the output slot.
+  std::vector<Ort::ConstValueInfo> node_outputs = node.GetOutputs();
+  bool need_inv_std_var =
+      (node_outputs.size() > 1 && !node_outputs[1].GetName().empty());
+
+  // Resolve axis attribute (default -1 per ONNX spec).
+  auto x_dims = x_attr->get_dim();
+  int64_t rank = static_cast<int64_t>(x_dims.size());
+  int64_t axis = GetIntAttrOrDefault(node, "axis", -1);
+  if (axis < 0) {
+    axis += rank;
+  }
+
+  // Collapse ONNX dims into [batch, norm_size] around the axis.
+  int64_t batch = 1;
+  for (int64_t i = 0; i < axis; ++i) {
+    batch *= x_dims[i];
+  }
+  int64_t norm_size = 1;
+  for (int64_t i = axis; i < rank; ++i) {
+    norm_size *= x_dims[i];
+  }
+
+  x_attr->set_dim({batch, norm_size});
+  x_attr->set_stride(ComputeStrides({batch, norm_size}));
+
+  scale_attr->set_dim({1, norm_size});
+  scale_attr->set_stride(ComputeStrides({1, norm_size}));
+
+  // Epsilon must be a pass-by-value scalar constant (fusilli requirement).
+  float epsilon = GetFloatAttrOrDefault(node, "epsilon", 1e-5f);
+  auto epsilon_attr = CreateScalarTensorAttr(next_uid++, epsilon);
+
+  RMSNormAttributes rmsnorm_attrs;
+  rmsnorm_attrs
+      .set_forward_phase(need_inv_std_var ? NormFwdPhase::TRAINING
+                                          : NormFwdPhase::INFERENCE)
+      .set_epsilon(epsilon_attr)
+      .set_compute_data_type(x_attr->get_data_type());
+
+  // graph.rmsnorm() returns {Y, INV_RMS}.  INV_RMS is nullptr in INFERENCE.
+  auto [y_attr, inv_rms_attr] =
+      graph.rmsnorm(x_attr, scale_attr, rmsnorm_attrs);
+
+  // Set Y to the same collapsed [batch, norm_size] shape.  The Build()
+  // loop overwrites this with the ORT graph's original output shape
+  // before ORT allocates the output tensor.
+  y_attr->set_dim({batch, norm_size});
+  y_attr->set_stride(ComputeStrides({batch, norm_size}));
+  output_attrs.push_back(y_attr);
+
+  if (need_inv_std_var) {
+    // Per fusilli's RmsNorm validation: INV_RMS must have the same rank
+    // as X with batch dim equal to X's batch and all other dims = 1.
+    assert(inv_rms_attr != nullptr &&
+           "TRAINING phase must produce inv_rms output");
+    inv_rms_attr->set_dim({batch, 1});
+    inv_rms_attr->set_stride(ComputeStrides({batch, 1}));
+    output_attrs.push_back(inv_rms_attr);
+  }
+
+  return Status::Success();
+}
+
 // Dispatch to appropriate Add*Node based on op_type.
 // Takes input tensor attributes, returns output tensor attributes.
 Status AddNode(
@@ -960,6 +1066,10 @@ Status AddNode(
     if (status.failed()) return status;
     output_attrs.push_back(y_attr);
     return Status::Success();
+  }
+
+  if (op_type == "SimplifiedLayerNormalization") {
+    return AddRMSNormNode(graph, node, input_attrs, output_attrs, next_uid);
   }
 
   return Status::Failure("Unsupported op type: " + op_type);
