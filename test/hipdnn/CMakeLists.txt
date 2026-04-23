@@ -248,6 +248,47 @@ target_compile_definitions(hipdnn_ep_tests PRIVATE
   REDUCESUM_SINGLE_AXIS_TEST_MODEL_PATH="${_red_single_model}"
 )
 
+# Rank-3 variant — exercises ComputeReductionKeepDimsShape at a rank
+# other than the 4D default all other models use.
+set(_red_rank3_model "${CMAKE_CURRENT_BINARY_DIR}/reducesum_rank3_test.onnx")
+add_custom_command(
+  OUTPUT ${_red_rank3_model}
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/gen_reduction_model.py
+          --op ReduceSum
+          --x-shape 3 5 7
+          --axes 1
+          --keepdims 1
+          --output ${_red_rank3_model}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_reduction_model.py
+  COMMENT "Generating ReduceSum rank-3 test model"
+  VERBATIM
+)
+list(APPEND _red_models ${_red_rank3_model})
+target_compile_definitions(hipdnn_ep_tests PRIVATE
+  REDUCESUM_RANK3_TEST_MODEL_PATH="${_red_rank3_model}"
+)
+
+# Negative-axes variant — exercises the `a + rank` normalisation path.
+set(_red_neg_model "${CMAKE_CURRENT_BINARY_DIR}/reducesum_negative_axes_test.onnx")
+add_custom_command(
+  OUTPUT ${_red_neg_model}
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_SOURCE_DIR}/gen_reduction_model.py
+          --op ReduceSum
+          --x-shape 2 4 8 8
+          --axes -1 -2
+          --keepdims 1
+          --output ${_red_neg_model}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_reduction_model.py
+  COMMENT "Generating ReduceSum negative-axes test model"
+  VERBATIM
+)
+list(APPEND _red_models ${_red_neg_model})
+target_compile_definitions(hipdnn_ep_tests PRIVATE
+  REDUCESUM_NEGATIVE_AXES_TEST_MODEL_PATH="${_red_neg_model}"
+)
+
 add_custom_target(generate_reduction_test_models DEPENDS ${_red_models})
 add_dependencies(hipdnn_ep_tests generate_reduction_test_models)
 

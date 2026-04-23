@@ -52,3 +52,18 @@ TEST_F(HipDNNReductionTest, ReduceSumSingleAxis) {
   RunAndCompare(REDUCESUM_SINGLE_AXIS_TEST_MODEL_PATH, {x}, {shape}, {"X"},
                 "Y");
 }
+
+// Rank-3 input — exercises the keep-dims shape loop at a rank other than 4.
+TEST_F(HipDNNReductionTest, ReduceSumRank3) {
+  const std::vector<int64_t> shape = {3, 5, 7};
+  auto x = MakeInput(3 * 5 * 7);
+  RunAndCompare(REDUCESUM_RANK3_TEST_MODEL_PATH, {x}, {shape}, {"X"}, "Y");
+}
+
+// Negative axes — exercises the `a + rank` normalisation path.
+TEST_F(HipDNNReductionTest, ReduceSumNegativeAxes) {
+  const std::vector<int64_t> shape = {2, 4, 8, 8};
+  auto x = MakeInput(2 * 4 * 8 * 8);
+  RunAndCompare(REDUCESUM_NEGATIVE_AXES_TEST_MODEL_PATH, {x}, {shape}, {"X"},
+                "Y");
+}
